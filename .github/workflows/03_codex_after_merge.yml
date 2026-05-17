@@ -1,0 +1,35 @@
+name: Codex After Merge Dispatcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**/*.md'
+      - 'ea/**/*.mq5'
+      - 'ea/**/*.mqh'
+      - 'scripts/**/*.py'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  create-codex-task:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Codex implementation issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            const title = `Codex EA implementation task from merge ${sha.slice(0,7)}`;
+            const body = `# Codex Implementation Task\n\nA knowledge or EA-related update was merged into main.\n\n## Required Actions\n1. Inspect latest Markdown under docs/.\n2. Extract EA Logic and Mathematical Concepts.\n3. Implement or update code under ea/.\n4. Add tests or validation notes under reports/.\n5. Open a PR. Do not push directly to main.\n\n## Source Commit\n${sha}\n`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['codex-ready','ea-implementation']
+            });
