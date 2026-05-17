@@ -1,0 +1,36 @@
+name: AMOS Issue Intake for Jules
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  prepare-jules-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = ['amos-intake','jules-ready'];
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels
+            });
+
+      - name: Comment instructions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: 'Jules: convert this issue into AMOS markdown and create PR.'
+            });
