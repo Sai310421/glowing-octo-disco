@@ -1,0 +1,17 @@
+name: NotebookLM Export
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/inbox/**/*.md'
+
+jobs:
+  export-notebooklm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export markdown packets
+        run: |
+          python3 scripts/notebooklm_export.py
