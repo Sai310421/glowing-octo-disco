@@ -160,6 +160,7 @@ AMOS Level 50 is considered complete only when all items below are operational:
 - Gemini/Jules intake prompt
 - Codex implementation prompt
 - OpenClaude safety prompt
+- Adopt the agent-skills lifecycle (Spec -> Plan -> Build -> Test -> Review -> Ship) as the shared prompt-pack standard, mapped to AMOS agent roles (see `docs/integrations/agent-skills.md`)
 
 ### Phase E: Full AMOS Runtime
 - Discord command center
@@ -194,3 +195,4 @@ Foundation layer has started. The next priority is to add:
 - NotebookLM export refinement
 - GitHub Issue templates by category
 - Headroom context compression layer (interim, until local AI reduces token cost)
+- agent-skills lifecycle prompt packs mapped to the Agent Council
