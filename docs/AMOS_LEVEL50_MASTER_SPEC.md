@@ -109,6 +109,9 @@ GPT, Claude, Gemini, OpenClaude, and optional local models form a review council
 ### Layer 12: Human Sovereign Approval
 Final deployment decisions remain under Sai approval.
 
+### Layer 13: Context Compression (Interim)
+Headroom compresses tool outputs, logs, RAG chunks, files, and conversation history before they reach cloud LLMs (Claude, Codex, Gemini), cutting token consumption by 60-95%. This is an **interim cost-reduction layer** adopted until local AI (OpenClaude / self-hosted models) carries the bulk of inference. Compression is local-first and reversible, so no knowledge is lost and no secrets leave the machine. See `docs/integrations/headroom.md`. Retirement is re-evaluated once local AI is operational.
+
 ---
 
 ## 4. Definition of Done for AMOS Level 50
@@ -144,6 +147,7 @@ AMOS Level 50 is considered complete only when all items below are operational:
 - Intake classification
 - Issue templates
 - Agent-specific prompt packs
+- Headroom context compression (interim cost layer, active until local AI is operational)
 
 ### Phase C: EA Factory
 - MQL5 project structure
@@ -156,6 +160,7 @@ AMOS Level 50 is considered complete only when all items below are operational:
 - Gemini/Jules intake prompt
 - Codex implementation prompt
 - OpenClaude safety prompt
+- Adopt the agent-skills lifecycle (Spec -> Plan -> Build -> Test -> Review -> Ship) as the shared prompt-pack standard, mapped to AMOS agent roles (see `docs/integrations/agent-skills.md`)
 
 ### Phase E: Full AMOS Runtime
 - Discord command center
@@ -189,3 +194,5 @@ Foundation layer has started. The next priority is to add:
 - Monte Carlo validator scaffold
 - NotebookLM export refinement
 - GitHub Issue templates by category
+- Headroom context compression layer (interim, until local AI reduces token cost)
+- agent-skills lifecycle prompt packs mapped to the Agent Council
