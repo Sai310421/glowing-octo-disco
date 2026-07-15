@@ -31,6 +31,10 @@ The repository is the central command room. All agents must treat this repositor
 ### 2.1 GPT / Codex
 Role: Senior DevOps architect and implementation lead.
 
+This is a *role*, not a fixed product. It can be filled by GPT/Codex, by an
+autonomous Claude implementer in CI (see `docs/integrations/claude-codex.md`),
+or by a human, so implementation never depends on a single vendor's quota.
+
 Responsibilities:
 - Convert AMOS Markdown into executable code.
 - Build EA, Python, CI/CD, validation scripts, and orchestration glue.
@@ -86,7 +90,10 @@ Issues are transformed into AMOS Markdown packets.
 Local LLM reviews PRs before merge.
 
 ### Layer 05: Codex Implementation Dispatch
-Merged knowledge automatically creates implementation tasks.
+Merged knowledge automatically creates implementation tasks. A `codex-ready`
+task can be implemented autonomously by a Claude agent in CI
+(`05_claude_codex_implementer.yml`), which opens a PR for the OpenClaude
+gate to review — no OpenAI/GPT quota required.
 
 ### Layer 06: EA Code Factory
 MQL5, Python, Pine, and validation code are generated and improved through PRs.
@@ -193,6 +200,9 @@ Operational now:
   secret/destructive-command checks before auto-merge (Layer 04).
 - Codex dispatch fires only on real knowledge packets (`docs/inbox/`) and
   EA code, not on every doc edit (Layer 05).
+- Autonomous Claude implementer reacts to `codex-ready` labels and opens
+  implementation PRs (`05_claude_codex_implementer.yml`); activate by adding
+  an `ANTHROPIC_API_KEY` secret. Vendor-independent — no GPT quota needed.
 - NotebookLM export path has a live source directory (`docs/inbox/`,
   Layer 07).
 - EA factory scaffold (`ea/`, `reports/`) and Monte Carlo validator

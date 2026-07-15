@@ -1,0 +1,70 @@
+name: Claude Codex Implementer
+
+# Autonomous "Claude version of Codex" (AMOS Layer 05).
+#
+# When an issue is labeled `codex-ready`, Claude reads the task, implements
+# the EA/dev work, and opens a pull request (never pushes to main). The
+# OpenClaude gate (Layer 04) then reviews that PR before merge.
+#
+# Setup: add an ANTHROPIC_API_KEY repository secret under
+# Settings > Secrets and variables > Actions. Until it is set, this
+# workflow no-ops with a warning. This key is separate from — and works
+# independently of — any OpenAI/GPT plan or its quota.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  implement:
+    if: github.event.label.name == 'codex-ready'
+    runs-on: ubuntu-latest
+    env:
+      HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - name: Warn if API key is missing
+        if: env.HAS_KEY != 'true'
+        run: |
+          echo "::warning::ANTHROPIC_API_KEY not set — skipping the Claude implementer."
+          echo "Add it under Settings > Secrets and variables > Actions to enable autonomous implementation."
+
+      - uses: actions/checkout@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Claude implements the task
+        if: env.HAS_KEY == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Bound cost/turns per run; adjust as needed.
+          claude_args: "--max-turns 40"
+          prompt: |
+            You are the AMOS implementation agent — the "Codex" role in the
+            AMOS Level 50 architecture. Repository conventions are in
+            docs/AMOS_LEVEL50_MASTER_SPEC.md.
+
+            Task: GitHub issue #${{ github.event.issue.number }}
+            Title: ${{ github.event.issue.title }}
+
+            Steps:
+            1. Read the issue body and any knowledge packet it references
+               under docs/inbox/, plus docs/AMOS_LEVEL50_MASTER_SPEC.md and
+               docs/RISK_GOVERNOR.md.
+            2. If there is a concrete EA/dev task, implement it under ea/
+               (MQL5 in ea/strategies and ea/include) and add a Monte Carlo
+               report or validation notes under reports/ that pass
+               scripts/monte_carlo_validate.py (P10 / worst-decile required).
+            3. If the issue contains no actionable EA logic yet, comment
+               saying so and stop — do not invent a strategy.
+            4. Create a new branch and open a pull request. NEVER push to
+               main. Reference issue #${{ github.event.issue.number }} in the
+               PR body.
+            5. Respect the Risk Governor and every Non-Negotiable Rule. Do
+               not commit secrets.
