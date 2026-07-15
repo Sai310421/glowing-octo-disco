@@ -1,0 +1,23 @@
+{
+  "_template": "Monte Carlo report TEMPLATE for BOOM Drift Grid v0. NOT a result.",
+  "_instructions": "Copy to reports/boom_drift_grid.mc.json and replace the null/zero placeholders with real Phase C backtest + Monte Carlo output. As shipped this fails scripts/monte_carlo_validate.py on purpose (num_simulations=0), because no validation has been run yet (Rule 3: no unvalidated claims).",
+  "strategy": "boom_drift_grid_v0",
+  "num_simulations": 0,
+  "median_return": null,
+  "p10_return": null,
+  "p10_max_drawdown": null,
+  "worst_case_drawdown": null,
+  "_extra_metrics_to_report": {
+    "p_ruin": null,
+    "expected_log_growth": null,
+    "win_rate": null,
+    "profit_factor": null,
+    "p95_drawdown": null,
+    "config": {
+      "exit_mode": null,
+      "delta": null,
+      "spike_filter": null,
+      "spread_model": null
+    }
+  }
+}
