@@ -19,6 +19,8 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  # Required by claude-code-action@v1 to fetch an OIDC token for auth.
+  id-token: write
 
 jobs:
   implement:
