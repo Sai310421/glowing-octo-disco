@@ -202,7 +202,8 @@ Operational now:
   EA code, not on every doc edit (Layer 05).
 - Autonomous Claude implementer reacts to `codex-ready` labels and opens
   implementation PRs (`05_claude_codex_implementer.yml`); activate by adding
-  an `ANTHROPIC_API_KEY` secret. Vendor-independent — no GPT quota needed.
+  a `CLAUDE_CODE_OAUTH_TOKEN` secret (Claude subscription, no API billing).
+  Vendor-independent — no GPT quota needed.
 - NotebookLM export path has a live source directory (`docs/inbox/`,
   Layer 07).
 - EA factory scaffold (`ea/`, `reports/`) and Monte Carlo validator

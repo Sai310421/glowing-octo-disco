@@ -29,18 +29,25 @@ issue.
 
 ## 2. Activation (one-time)
 
-The workflow is inert until you add one repository secret:
+Authentication uses a **Claude subscription (Pro/Max) OAuth token** — no
+per-token API billing. The workflow is inert until you add one secret:
 
-- Go to **Settings > Secrets and variables > Actions > New repository secret**.
-- Name: `ANTHROPIC_API_KEY`
-- Value: an Anthropic API key.
+1. Generate the token locally (Pro/Max only):
+   ```bash
+   claude setup-token
+   ```
+2. Go to **Settings > Secrets and variables > Actions > New repository secret**.
+3. Name: `CLAUDE_CODE_OAUTH_TOKEN`, Value: the token from step 1.
 
 Notes:
-- This is an **Anthropic** key. It is independent of your OpenAI/ChatGPT
-  Codex subscription and of OpenAI API billing — GPT quota being exhausted
-  does not affect it.
+- This uses your **Anthropic/Claude subscription**, independent of any
+  OpenAI/ChatGPT Codex plan or OpenAI API billing — GPT quota being
+  exhausted does not affect it.
 - Until the secret exists, the workflow runs but no-ops with a warning, so
   nothing breaks.
+- Alternative: to use a Console API key instead (pay-as-you-go), swap the
+  workflow input to `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`
+  and set that secret instead. Requires available API credit.
 
 ## 3. Guardrails
 

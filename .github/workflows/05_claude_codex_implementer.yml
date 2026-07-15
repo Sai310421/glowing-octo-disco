@@ -6,9 +6,11 @@ name: Claude Codex Implementer
 # the EA/dev work, and opens a pull request (never pushes to main). The
 # OpenClaude gate (Layer 04) then reviews that PR before merge.
 #
-# Setup: add an ANTHROPIC_API_KEY repository secret under
+# Auth: uses a Claude subscription (Pro/Max) OAuth token — no per-token
+# API billing. Generate it locally with `claude setup-token` and add it as
+# a CLAUDE_CODE_OAUTH_TOKEN repository secret under
 # Settings > Secrets and variables > Actions. Until it is set, this
-# workflow no-ops with a warning. This key is separate from — and works
+# workflow no-ops with a warning. This is separate from — and works
 # independently of — any OpenAI/GPT plan or its quota.
 
 on:
@@ -27,13 +29,13 @@ jobs:
     if: github.event.label.name == 'codex-ready'
     runs-on: ubuntu-latest
     env:
-      HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      HAS_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
-      - name: Warn if API key is missing
+      - name: Warn if OAuth token is missing
         if: env.HAS_KEY != 'true'
         run: |
-          echo "::warning::ANTHROPIC_API_KEY not set — skipping the Claude implementer."
-          echo "Add it under Settings > Secrets and variables > Actions to enable autonomous implementation."
+          echo "::warning::CLAUDE_CODE_OAUTH_TOKEN not set — skipping the Claude implementer."
+          echo "Generate it with 'claude setup-token' (Pro/Max) and add it under Settings > Secrets and variables > Actions."
 
       - uses: actions/checkout@v4
         if: env.HAS_KEY == 'true'
@@ -44,7 +46,7 @@ jobs:
         if: env.HAS_KEY == 'true'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Pin a broadly-available model (avoid beta variants that need
           # special account access) and bound cost/turns per run.
           claude_args: "--model claude-sonnet-5 --max-turns 40"
