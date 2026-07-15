@@ -186,13 +186,25 @@ AMOS Level 50 is considered complete only when all items below are operational:
 
 ## 7. Current Status
 
-Foundation layer has started. The next priority is to add:
+Foundation layer is largely in place.
 
-- Agent prompt packs
-- EA factory scaffold
-- Risk governor specification
-- Monte Carlo validator scaffold
-- NotebookLM export refinement
-- GitHub Issue templates by category
-- Headroom context compression layer (interim, until local AI reduces token cost)
-- agent-skills lifecycle prompt packs mapped to the Agent Council
+Operational now:
+- OpenClaude PR review gate runs on a GitHub-hosted runner and enforces
+  secret/destructive-command checks before auto-merge (Layer 04).
+- Codex dispatch fires only on real knowledge packets (`docs/inbox/`) and
+  EA code, not on every doc edit (Layer 05).
+- NotebookLM export path has a live source directory (`docs/inbox/`,
+  Layer 07).
+- EA factory scaffold (`ea/`, `reports/`) and Monte Carlo validator
+  (`scripts/monte_carlo_validate.py`) exist (Layers 06/08).
+- Risk Governor specification (`docs/RISK_GOVERNOR.md`, Layer 09).
+- AMOS intake Issue template.
+- Headroom (interim) and agent-skills adopted as documented standards.
+
+Next priority:
+- Wire the Monte Carlo validator and Risk Governor into the EA pipeline as
+  enforced CI checks.
+- Implement the shared `ea/include/` risk module.
+- First real EA strategy from a `docs/inbox/` packet.
+- Move OpenClaude to a local Ollama-backed self-hosted runner once local AI
+  is operational (retire Headroom per its exit criteria).

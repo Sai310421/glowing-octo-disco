@@ -9,14 +9,24 @@ permissions:
   pull-requests: write
 
 jobs:
+  # Runs on a GitHub-hosted runner so the gate is always executable
+  # (no self-hosted runner required). Cost-optimized upgrade path: move
+  # this job to a self-hosted runner backed by a local Ollama model once
+  # local AI is operational — see docs/integrations/headroom.md,
+  # "until local AI" strategy.
   local-review:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Run OpenClaude
+      - name: Run OpenClaude safety gate
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 scripts/openclaude_pr_review.py
