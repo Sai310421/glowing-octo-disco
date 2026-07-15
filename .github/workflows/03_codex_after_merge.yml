@@ -6,10 +6,12 @@ on:
     # Only knowledge packets (docs/inbox) and EA code should dispatch a
     # Codex implementation task. Editing the spec, integration docs, or
     # tooling must not spawn no-op EA implementation issues.
+    # Note: 'docs/inbox/**' (not 'docs/inbox/**/*.md') so that packets placed
+    # directly in docs/inbox/ also match — GitHub's '**/*.md' requires a
+    # subdirectory and silently skips top-level files.
     paths:
-      - 'docs/inbox/**/*.md'
-      - 'ea/**/*.mq5'
-      - 'ea/**/*.mqh'
+      - 'docs/inbox/**'
+      - 'ea/**'
 
 permissions:
   contents: read
