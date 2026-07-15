@@ -3,11 +3,13 @@ name: Codex After Merge Dispatcher
 on:
   push:
     branches: [main]
+    # Only knowledge packets (docs/inbox) and EA code should dispatch a
+    # Codex implementation task. Editing the spec, integration docs, or
+    # tooling must not spawn no-op EA implementation issues.
     paths:
-      - 'docs/**/*.md'
+      - 'docs/inbox/**/*.md'
       - 'ea/**/*.mq5'
       - 'ea/**/*.mqh'
-      - 'scripts/**/*.py'
 
 permissions:
   contents: read

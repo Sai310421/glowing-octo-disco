@@ -1,0 +1,34 @@
+name: AMOS Intake
+description: Drop a raw thought, EA idea, or research note for Jules to structure.
+title: "[Intake] "
+labels: ["amos-intake"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Low-friction intake (Layer 02). Write freely — Jules/Gemini will
+        convert this into an AMOS Markdown packet under `docs/inbox/`.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - EA / Strategy idea
+        - Research / Math concept
+        - Business / Ops
+        - SNS / Content
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: content
+    attributes:
+      label: Raw input
+      description: Text, voice transcript, image notes, or links. Rough is fine.
+    validations:
+      required: true
+  - type: input
+    id: sources
+    attributes:
+      label: Sources / links
+      description: Optional URLs, tickers, or references.
