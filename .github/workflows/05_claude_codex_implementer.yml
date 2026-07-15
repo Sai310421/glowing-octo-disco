@@ -45,8 +45,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Bound cost/turns per run; adjust as needed.
-          claude_args: "--max-turns 40"
+          # Pin a broadly-available model (avoid beta variants that need
+          # special account access) and bound cost/turns per run.
+          claude_args: "--model claude-sonnet-5 --max-turns 40"
           prompt: |
             You are the AMOS implementation agent — the "Codex" role in the
             AMOS Level 50 architecture. Repository conventions are in
