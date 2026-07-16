@@ -1,0 +1,25 @@
+{
+  "_template": "Monte Carlo report TEMPLATE for BOOM Delta Lock & AI Recovery v1.1. NOT a result.",
+  "_instructions": "Copy to reports/boom_delta_lock_ai_recovery.mc.json and fill with real Phase C output (Deriv BOOM_100 backtest + validated AI model). As shipped this FAILS scripts/monte_carlo_validate.py (num_simulations=0) because nothing has been validated (Rule 3).",
+  "strategy": "boom_delta_lock_ai_recovery_v1_1",
+  "num_simulations": 0,
+  "median_return": null,
+  "p10_return": null,
+  "p10_max_drawdown": null,
+  "worst_case_drawdown": null,
+  "_extra_metrics_to_report": {
+    "p_ruin": null,
+    "expected_log_growth": null,
+    "ai_out_of_sample_edge": null,
+    "recovery_success_rate": null,
+    "lock_integrity_ok": null,
+    "config": {
+      "delta": null,
+      "n_max": null,
+      "recovery_mult": null,
+      "confidence_gate": null,
+      "onnx_model": null,
+      "spread_model": null
+    }
+  }
+}

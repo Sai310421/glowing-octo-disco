@@ -26,11 +26,19 @@ Implements `docs/inbox/boom_delta_lock_ai_recovery.md` for Deriv **BOOM_100**.
 - **Hard-risk inputs** (§15-16) are fixed inputs; the AI stub only chooses
   direction/entry/wait and cannot change any risk parameter.
 
-## What is stubbed (needs a model)
-- `AIPredict()` — assemble the §7 feature vector, run the ONNX model, and fill
-  `dir/pmax/psecond`. Left unimplemented until a validated model exists; no
-  fabricated inference. Set `InpUseONNX=true` and `InpOnnxModelFile` once a model
-  (`.onnx`) is placed under `MQL5/Files` and its tensor shapes are wired in.
+## AI wiring (contract in `ai/FEATURES.md`)
+- `AIPredict()` now assembles the 14-feature vector and runs the ONNX model per
+  the fixed contract (`features[1,14]` -> `probabilities[1,3]`, classes
+  `[RANGE, UP, DOWN]`). **Any failure or missing model -> safe WAIT** (no
+  recovery trades). Enable with `InpUseONNX=true` + `InpOnnxModelFile` once a
+  validated `.onnx` is in `MQL5/Files`.
+- Computed features: atr, tick_velocity, spread, ema_slope, adx, rsi, spike_age,
+  distance_from_high. The six ICT/structure features (mss, bos, displacement,
+  liquidity_sweep, fvg, vegas) are **0.0 placeholders** until defined AND shown
+  to matter on a synthetic index (no real order flow) — see `ai/FEATURES.md`.
+- Train + export the model with `ai/train_direction_model.py` (needs real data;
+  ships no model, makes no claim). Confirm the exported tensor names/shapes match
+  the contract before enabling.
 
 ## Before testing
 - Calibrate `Delta` / `d_bs` to your Deriv feed's digits (see the v0 README).
