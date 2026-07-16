@@ -68,6 +68,11 @@ input int    InpMaxSpreadPts   = 0;     // max spread in points (0 = disabled)
 input group "AI model (section 7; SAFE STUB until a model exists)"
 input bool   InpUseONNX        = false; // enable ONNX inference (needs a model)
 input string InpOnnxModelFile  = "";    // model file under MQL5/Files
+input int    InpATRPeriod      = 14;    // feature: ATR period
+input int    InpRSIPeriod      = 14;    // feature: RSI period
+input int    InpADXPeriod      = 14;    // feature: ADX period
+input int    InpEMAPeriod      = 50;    // feature: EMA slope period
+input int    InpHighLookback   = 100;   // feature: distance-from-high lookback (bars)
 
 input group "Misc"
 input long   InpMagicBase      = 550110; // base / lock basket magic
@@ -77,6 +82,11 @@ input int    InpSlippage       = 10;     // deviation in points
 CTrade            trade;
 ENUM_ENGINE_STATE g_state       = ST_IDLE;
 long              g_onnx        = INVALID_HANDLE;
+int               g_hATR        = INVALID_HANDLE;
+int               g_hRSI        = INVALID_HANDLE;
+int               g_hADX        = INVALID_HANDLE;
+int               g_hEMA        = INVALID_HANDLE;
+#define AI_NFEATURES 14   // must match ai/FEATURES.md
 double            g_lockedLot   = 0.0;   // total SELL lot captured at lock
 double            g_recStartEq  = 0.0;   // equity at recovery start
 datetime          g_recStart    = 0;     // recovery start time
@@ -89,11 +99,31 @@ int OnInit()
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(_Symbol);
 
+   // feature indicators (contract: ai/FEATURES.md)
+   g_hATR = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
+   g_hRSI = iRSI(_Symbol, PERIOD_CURRENT, InpRSIPeriod, PRICE_CLOSE);
+   g_hADX = iADX(_Symbol, PERIOD_CURRENT, InpADXPeriod);
+   g_hEMA = iMA(_Symbol, PERIOD_CURRENT, InpEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
    if(InpUseONNX && StringLen(InpOnnxModelFile) > 0)
      {
       g_onnx = OnnxCreate(InpOnnxModelFile, ONNX_DEFAULT);
       if(g_onnx == INVALID_HANDLE)
+        {
          Print("ONNX model not loaded ('", InpOnnxModelFile, "') - AI recovery stays in safe WAIT.");
+        }
+      else
+        {
+         // contract: input features[1,14], output probabilities[1,3]
+         const long in_shape[]  = {1, AI_NFEATURES};
+         const long out_shape[] = {1, 3};
+         if(!OnnxSetInputShape(g_onnx, 0, in_shape) || !OnnxSetOutputShape(g_onnx, 0, out_shape))
+           {
+            Print("ONNX shape setup failed - AI recovery stays in safe WAIT.");
+            OnnxRelease(g_onnx);
+            g_onnx = INVALID_HANDLE;
+           }
+        }
      }
    return(INIT_SUCCEEDED);
   }
@@ -101,6 +131,10 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(g_onnx != INVALID_HANDLE) OnnxRelease(g_onnx);
+   if(g_hATR  != INVALID_HANDLE) IndicatorRelease(g_hATR);
+   if(g_hRSI  != INVALID_HANDLE) IndicatorRelease(g_hRSI);
+   if(g_hADX  != INVALID_HANDLE) IndicatorRelease(g_hADX);
+   if(g_hEMA  != INVALID_HANDLE) IndicatorRelease(g_hEMA);
   }
 
 //+------------------------------------------------------------------+
@@ -298,17 +332,91 @@ bool LockValid()
 //+------------------------------------------------------------------+
 struct AISignal { int dir; double pmax; double psecond; };
 
+bool CopyOne(const int handle, const int buffer, double &val)
+  {
+   double a[];
+   if(handle == INVALID_HANDLE) return(false);
+   if(CopyBuffer(handle, buffer, 0, 1, a) != 1) return(false);
+   val = a[0];
+   return(true);
+  }
+
+// bars since the last up-spike (section 7 feature), scanning back a window.
+double SpikeAgeBars()
+  {
+   int tau = MathMax(1, InpSpikeLookback);
+   for(int i = 0; i < InpHighLookback; i++)
+     {
+      double c0 = iClose(_Symbol, PERIOD_CURRENT, i);
+      double c1 = iClose(_Symbol, PERIOD_CURRENT, i + tau);
+      if(c0 == 0.0 || c1 == 0.0) break;
+      if((c0 - c1) / tau >= InpSpikeMaxVel) return((double)i);
+     }
+   return((double)InpHighLookback);
+  }
+
+double DistanceFromHigh()
+  {
+   int hh = iHighest(_Symbol, PERIOD_CURRENT, MODE_HIGH, InpHighLookback, 0);
+   if(hh < 0) return(0.0);
+   double high = iHigh(_Symbol, PERIOD_CURRENT, hh);
+   return(high - iClose(_Symbol, PERIOD_CURRENT, 0));
+  }
+
+// Fill the 14-feature vector in the ai/FEATURES.md order. ICT/structure
+// features (6-11) are 0.0 placeholders until defined AND validated.
+bool AssembleFeatures(float &f[])
+  {
+   ArrayResize(f, AI_NFEATURES);
+   ArrayInitialize(f, 0.0);
+
+   double atr, rsi, adx;
+   if(!CopyOne(g_hATR, 0, atr)) return(false);
+   if(!CopyOne(g_hRSI, 0, rsi)) return(false);
+   if(!CopyOne(g_hADX, 0, adx)) return(false);
+   double ema[];
+   if(CopyBuffer(g_hEMA, 0, 0, 2, ema) != 2) return(false);
+
+   double c0 = iClose(_Symbol, PERIOD_CURRENT, 0);
+   double c1 = iClose(_Symbol, PERIOD_CURRENT, 1);
+
+   f[0]  = (float)atr;              // atr
+   f[1]  = (float)(c0 - c1);        // tick_velocity (bar proxy)
+   f[2]  = (float)SpreadPts();      // spread
+   f[3]  = (float)(ema[0] - ema[1]);// ema_slope
+   f[4]  = (float)adx;              // adx
+   f[5]  = (float)rsi;              // rsi
+   // f[6..11] = mss/bos/displacement/liquidity_sweep/fvg/vegas -> 0 (TODO, validate)
+   f[12] = (float)SpikeAgeBars();   // spike_age
+   f[13] = (float)DistanceFromHigh(); // distance_from_high
+   return(true);
+  }
+
+// Run the ONNX model per the contract. Any failure -> safe WAIT (never trades
+// recovery on a bad/absent model). Class order [RANGE, UP, DOWN].
 AISignal AIPredict()
   {
    AISignal s; s.dir = AI_RANGE; s.pmax = 0.0; s.psecond = 0.0;
    if(g_onnx == INVALID_HANDLE) return(s);   // no model -> safe WAIT
 
-   // TODO(model): assemble the section-7 feature vector (ATR, tick velocity,
-   // spread, EMA slope, ADX, RSI, MSS, BOS, displacement, liquidity sweep,
-   // FVG, Vegas, spike age, distance-from-high), run OnnxRun with the model's
-   // real input/output tensor shapes, then fill dir/pmax/psecond from the
-   // output probabilities. Left unimplemented on purpose until a validated
-   // model exists (no fabricated inference).
+   float feat[];
+   if(!AssembleFeatures(feat)) return(s);
+
+   matrixf in(1, AI_NFEATURES);
+   for(int i = 0; i < AI_NFEATURES; i++) in[0][i] = feat[i];
+   matrixf out(1, 3);
+   if(!OnnxRun(g_onnx, ONNX_NO_CONVERSION, in, out)) return(s);
+
+   double p[3];
+   for(int i = 0; i < 3; i++) p[i] = (double)out[0][i];
+   int amax = 0;
+   for(int i = 1; i < 3; i++) if(p[i] > p[amax]) amax = i;
+   double second = -1.0;
+   for(int i = 0; i < 3; i++) if(i != amax && p[i] > second) second = p[i];
+
+   s.dir = amax;                 // 0 RANGE, 1 UP, 2 DOWN (matches AI_* constants)
+   s.pmax = p[amax];
+   s.psecond = (second < 0.0 ? 0.0 : second);
    return(s);
   }
 
