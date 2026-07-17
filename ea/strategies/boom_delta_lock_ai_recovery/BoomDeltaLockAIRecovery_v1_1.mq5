@@ -5,16 +5,17 @@
 //|  Delta Lock & AI Recovery Engine (spec v1.1). Implements         |
 //|  docs/inbox/boom_delta_lock_ai_recovery.md for Deriv BOOM_100.   |
 //|                                                                  |
-//|  SKELETON: deterministic logic (grid, equal-volume delta lock,   |
-//|  lock verify, recovery basket, finite-risk caps, emergency) is   |
-//|  implemented; the AI direction model is a SAFE STUB - with no     |
-//|  trained ONNX model it always returns RANGE/WAIT, so no recovery  |
-//|  trades are taken. NOT deployable: gated on v0 Phase C validation |
-//|  AND a validated model, plus Monte Carlo P10 and human approval   |
-//|  (Rules 3/4/7, Layer 12). Prices are in index price units.       |
+//|  Deterministic logic (grid, equal-volume delta lock, lock verify  |
+//|  + rebalance, recovery basket, finite-risk caps, emergency) is    |
+//|  implemented. The AI direction model runs via ONNX when a         |
+//|  validated model is loaded; with no model it returns RANGE/WAIT   |
+//|  so NO recovery trades are taken. NOT deployable: gated on v0     |
+//|  Phase C validation AND a validated model, plus Monte Carlo P10   |
+//|  and human approval (Rules 3/4/7, Layer 12). Prices are in index  |
+//|  price units. Needs an MT5 compile pass (no MetaEditor here).     |
 //+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.10"
+#property version   "1.11"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -89,9 +90,9 @@ int               g_hEMA        = INVALID_HANDLE;
 #define AI_NFEATURES 14   // must match ai/FEATURES.md
 double            g_lockedLot   = 0.0;   // total SELL lot captured at lock
 double            g_recStartEq  = 0.0;   // equity at recovery start
-datetime          g_recStart    = 0;     // recovery start time
-double            g_recPeak     = 0.0;   // recovery basket peak PnL
+datetime          g_recStart    = 0;     // lock/recovery episode start time
 datetime          g_cooldownEnd = 0;
+int               g_lockRebalTries = 0;  // lock-imbalance correction attempts
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -140,8 +141,6 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| Position / order helpers (filtered by magic)                     |
 //+------------------------------------------------------------------+
-bool Owned(const long magic, const string sym){ return(sym == _Symbol && (magic == InpMagicBase || magic == InpMagicRecovery)); }
-
 double SideLot(const long magic, const ENUM_POSITION_TYPE type)
   {
    double v = 0.0;
@@ -276,43 +275,111 @@ bool SpikeUp()
   }
 
 // Approximate cost to unwind everything (section 13). Conservative estimate.
+// Returns cost only; the SafetyBuffer is added once at the comparison site.
 double CloseCost()
   {
    int totalPos = SideCount(InpMagicBase,POSITION_TYPE_SELL) + SideCount(InpMagicBase,POSITION_TYPE_BUY)
                 + SideCount(InpMagicRecovery,POSITION_TYPE_SELL) + SideCount(InpMagicRecovery,POSITION_TYPE_BUY);
    double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double spreadCostPerPos = SpreadPts() * tickVal * (InpLot / SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN));
-   return(totalPos * spreadCostPerPos + InpSafetyBuffer);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lots = (vmin > 0.0) ? (InpLot / vmin) : 1.0;
+   double spreadCostPerPos = SpreadPts() * tickVal * lots;
+   return(totalPos * spreadCostPerPos);
+  }
+
+// Round a volume to the symbol's step and min/max limits.
+double NormVol(double v)
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step > 0.0) v = MathFloor(v / step + 1e-9) * step;
+   v = MathMax(vmin, MathMin(vmax, v));
+   return(NormalizeDouble(v, 2));
   }
 
 //+------------------------------------------------------------------+
 //| Phase A: SELL pyramid + equal-volume dynamic BUY STOP            |
 //+------------------------------------------------------------------+
+// Arm one SELL STOP a Delta below the lowest entry (section 3). Only ever
+// one pending at a time, so this does not spam the server.
+void ManageSellGrid()
+  {
+   trade.SetExpertMagicNumber(InpMagicBase);
+   int k = SideCount(InpMagicBase, POSITION_TYPE_SELL);
+   if(SpikeUp() || k >= InpNMax) return;
+   if(PendingCount(InpMagicBase, ORDER_TYPE_SELL_STOP) > 0) return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ref = (k > 0) ? LowestSellEntry(InpMagicBase) : bid;
+   double lvl = NormalizeDouble(ref - InpDelta, _Digits);
+   if(bid - lvl < MinStopDist()) lvl = NormalizeDouble(bid - MinStopDist() - _Point, _Digits);
+   trade.SellStop(InpLot, lvl, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "BDL grid");
+  }
+
+// Find the current base BUY STOP (ticket 0 if none).
+ulong FindBuyStop(double &lot, double &price)
+  {
+   lot = 0.0; price = 0.0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == 0) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagicBase) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP)
+        { lot = OrderGetDouble(ORDER_VOLUME_CURRENT); price = OrderGetDouble(ORDER_PRICE_OPEN); return(t); }
+     }
+   return(0);
+  }
+
+// Keep exactly one BUY STOP with lot == total SELL lot (equal-volume hedge,
+// section 4). Re-placed ONLY when the lot must change (a SELL filled) or the
+// price has drifted materially, so it does not churn every tick.
+void ManageEqualHedge()
+  {
+   trade.SetExpertMagicNumber(InpMagicBase);
+   double sellLot = SideLot(InpMagicBase, POSITION_TYPE_SELL);
+
+   double exLot, exPrice;
+   ulong existing = FindBuyStop(exLot, exPrice);
+
+   if(sellLot <= 0.0)                        // no exposure -> no hedge
+     { if(existing != 0) trade.OrderDelete(existing); return; }
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double target = NormalizeDouble(ask + InpBuyStopDist, _Digits);
+   if(target - ask < MinStopDist()) target = NormalizeDouble(ask + MinStopDist() + _Point, _Digits);
+
+   if(existing == 0)
+      trade.BuyStop(sellLot, target, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "BDL hedge");
+   else if(MathAbs(exLot - sellLot) > 1e-6)  // lot must always equal SELL total
+     {
+      trade.OrderDelete(existing);
+      trade.BuyStop(sellLot, target, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "BDL hedge");
+     }
+   else if(MathAbs(exPrice - target) > InpBuyStopDist * 0.5)  // chase only on material drift
+      trade.OrderModify(existing, target, 0.0, 0.0, ORDER_TIME_GTC, 0);
+  }
+
 void ManageDriftGrid()
   {
-   int k = SideCount(InpMagicBase, POSITION_TYPE_SELL);
+   ManageSellGrid();
+   ManageEqualHedge();
+  }
+
+// Correct a small lock imbalance (e.g. a partial fill) toward net-zero before
+// declaring an emergency. Adds the missing side at the difference volume.
+void RebalanceLock()
+  {
+   double s = SideLot(InpMagicBase, POSITION_TYPE_SELL);
+   double b = SideLot(InpMagicBase, POSITION_TYPE_BUY);
+   double diff = s - b;                       // >0 => need more BUY
+   double vol = NormVol(MathAbs(diff));
+   if(vol < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)) return;
    trade.SetExpertMagicNumber(InpMagicBase);
-
-   // add a SELL STOP one Delta below (unless spiking / capped / already armed)
-   if(!SpikeUp() && k < InpNMax && PendingCount(InpMagicBase, ORDER_TYPE_SELL_STOP) == 0)
-     {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ref = (k > 0) ? LowestSellEntry(InpMagicBase) : bid;
-      double lvl = NormalizeDouble(ref - InpDelta, _Digits);
-      if(bid - lvl < MinStopDist()) lvl = NormalizeDouble(bid - MinStopDist() - _Point, _Digits);
-      trade.SellStop(InpLot, lvl, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "BDL grid");
-     }
-
-   // dynamic equal-volume BUY STOP: lot = total SELL lot, always re-placed on top
-   double sellLot = SideLot(InpMagicBase, POSITION_TYPE_SELL);
-   if(sellLot > 0.0)
-     {
-      DeletePendings(InpMagicBase); // clears the SELL STOP too; it re-arms next tick
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double lvl = NormalizeDouble(ask + InpBuyStopDist, _Digits);
-      if(lvl - ask < MinStopDist()) lvl = NormalizeDouble(ask + MinStopDist() + _Point, _Digits);
-      trade.BuyStop(sellLot, lvl, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "BDL hedge");
-     }
+   if(diff > 0.0) trade.Buy(vol, _Symbol, 0.0, 0.0, 0.0, "BDL lock rebal");
+   else           trade.Sell(vol, _Symbol, 0.0, 0.0, 0.0, "BDL lock rebal");
   }
 
 //+------------------------------------------------------------------+
@@ -402,13 +469,14 @@ AISignal AIPredict()
    float feat[];
    if(!AssembleFeatures(feat)) return(s);
 
-   matrixf in(1, AI_NFEATURES);
-   for(int i = 0; i < AI_NFEATURES; i++) in[0][i] = feat[i];
-   matrixf out(1, 3);
-   if(!OnnxRun(g_onnx, ONNX_NO_CONVERSION, in, out)) return(s);
+   // Flat float arrays + shapes set in OnInit (features[1,14] -> probs[1,3]).
+   float probs[];
+   ArrayResize(probs, 3);
+   ArrayInitialize(probs, 0.0);
+   if(!OnnxRun(g_onnx, ONNX_NO_CONVERSION, feat, probs)) return(s);
 
    double p[3];
-   for(int i = 0; i < 3; i++) p[i] = (double)out[0][i];
+   for(int i = 0; i < 3; i++) p[i] = (double)probs[i];
    int amax = 0;
    for(int i = 1; i < 3; i++) if(p[i] > p[amax]) amax = i;
    double second = -1.0;
@@ -510,6 +578,7 @@ void OnTick()
       case ST_BUY_STOP_TRIGGER:
         {
          g_lockedLot = SideLot(InpMagicBase, POSITION_TYPE_SELL);
+         g_lockRebalTries = 0;
          g_state = ST_DELTA_LOCK;
          break;
         }
@@ -521,17 +590,24 @@ void OnTick()
         }
       case ST_LOCK_VERIFY:
         {
-         if(!LockValid()) { g_state = ST_EMERGENCY; break; }
+         if(!LockValid())
+           {
+            // try to correct a small imbalance before giving up
+            if(g_lockRebalTries < 3) { RebalanceLock(); g_lockRebalTries++; break; }
+            g_state = ST_EMERGENCY; break;
+           }
          g_recStartEq = AccountInfoDouble(ACCOUNT_EQUITY);
          g_recStart   = TimeCurrent();
-         g_recPeak    = 0.0;
          g_state = ST_AI_WAIT;
          break;
         }
       case ST_AI_WAIT:
         {
+         // do not hold a locked loss forever: cap the wait by tau_max
+         if(g_recStart > 0 && (TimeCurrent() - g_recStart) >= InpTauMaxSec)
+           { g_state = ST_CLOSE_ALL; break; }
          AISignal s = AIPredict();
-         if(!ConfidencePass(s)) break; // WAIT (this is where the stub always lands)
+         if(!ConfidencePass(s)) break; // WAIT (with no model this is always the path)
          if(s.dir == AI_DOWN) g_state = ST_DOWN_RECOVERY;
          else if(s.dir == AI_UP) g_state = ST_UP_RECOVERY;
          // RANGE => keep waiting
@@ -541,16 +617,12 @@ void OnTick()
       case ST_UP_RECOVERY:
         {
          AddRecovery(g_state == ST_UP_RECOVERY);
+         // section 13 stop: total PnL covers unwind cost + safety buffer
          double total = BasketProfit(InpMagicBase) + BasketProfit(InpMagicRecovery);
          if(total >= CloseCost() + InpSafetyBuffer) { g_state = ST_TARGET_REACHED; break; }
-         if(RecoveryExhausted()) { g_state = ST_CLOSE_ALL; break; }
-         // re-evaluate AI; if it flips to the opposite high-confidence call, hand back to wait
-         AISignal s = AIPredict();
-         if(ConfidencePass(s))
-           {
-            if(s.dir == AI_UP && g_state == ST_DOWN_RECOVERY) g_state = ST_AI_WAIT;
-            if(s.dir == AI_DOWN && g_state == ST_UP_RECOVERY) g_state = ST_AI_WAIT;
-           }
+         // section 14 caps: give up this episode on DD or time exhaustion.
+         // Direction is committed for the episode; caps handle a wrong call.
+         if(RecoveryExhausted()) g_state = ST_CLOSE_ALL;
          break;
         }
       case ST_TARGET_REACHED:
@@ -565,7 +637,7 @@ void OnTick()
           + SideCount(InpMagicRecovery,POSITION_TYPE_SELL)+SideCount(InpMagicRecovery,POSITION_TYPE_BUY) == 0)
            {
             g_cooldownEnd = TimeCurrent() + 60;
-            g_lockedLot = 0.0; g_recStart = 0; g_recStartEq = 0.0; g_recPeak = 0.0;
+            g_lockedLot = 0.0; g_recStart = 0; g_recStartEq = 0.0; g_lockRebalTries = 0;
             g_state = ST_COOLDOWN;
            }
          break;

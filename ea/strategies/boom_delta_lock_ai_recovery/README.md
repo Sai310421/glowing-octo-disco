@@ -1,14 +1,24 @@
-# BOOM Delta Lock & AI Recovery v1.1 (EA skeleton)
+# BOOM Delta Lock & AI Recovery v1.1 (EA)
 
 Implements `docs/inbox/boom_delta_lock_ai_recovery.md` for Deriv **BOOM_100**.
 
-> **Skeleton, not deployable.** The deterministic logic (drift grid, equal-volume
-> delta lock, lock verify, recovery basket, finite-risk caps, state machine,
-> emergency) is implemented. The **AI direction model is a safe stub**: with no
-> trained ONNX model loaded, `AIPredict()` returns RANGE at zero confidence, so
-> the confidence gate always yields WAIT and **no recovery trades are taken**.
-> Gated on v0 Phase C validation AND a validated model; needs Monte Carlo P10
-> acceptance and human approval before any live use (Rules 3/4/7, Layer 12).
+> **Not deployable yet.** The deterministic logic (drift grid, equal-volume delta
+> lock, lock verify + rebalance, recovery basket, finite-risk caps, state machine,
+> emergency) is implemented and hardened. The **AI direction model runs via ONNX
+> when a validated model is loaded**; with no model, `AIPredict()` returns RANGE at
+> zero confidence, so the gate always yields WAIT and **no recovery trades are
+> taken**. Gated on v0 Phase C validation AND a validated model; needs Monte Carlo
+> P10 acceptance and human approval before any live use (Rules 3/4/7, Layer 12).
+
+## v1.11 hardening
+- **No order churn**: the equal-volume BUY STOP is re-placed only when the SELL
+  lot changes or the price drifts past half `d_bs` — not every tick.
+- **Lock rebalance**: a small `|BUY−SELL|` imbalance (e.g. a partial fill) is
+  corrected toward net-zero before falling back to Emergency.
+- **AI_WAIT timeout**: a lock is not held forever — it closes after `tau_max`.
+- **Fixed** a double-counted SafetyBuffer; **ONNX** I/O uses flat `float[]` arrays
+  matching the `[1,14] -> [1,3]` contract; removed a risky mid-recovery flip.
+- Needs an MT5 compile pass (no MetaEditor here) — paste any errors to fix.
 
 ## Files
 - `BoomDeltaLockAIRecovery_v1_1.mq5` — the EA (compile in MetaEditor 5).
