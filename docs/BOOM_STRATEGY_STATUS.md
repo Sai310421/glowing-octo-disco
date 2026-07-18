@@ -15,7 +15,7 @@ Last updated by the AMOS pipeline; see git history for details.
 | v1 packet (§8 survival) | `docs/inbox/boom_drift_grid_v1.md` | design done | v0 Phase C results |
 | v1.1 packet (Delta Lock + AI) | `docs/inbox/boom_delta_lock_ai_recovery.md` | design done | v0 Phase C + AI model |
 | Trend Rider packet (video-faithful) | `docs/inbox/boom_trend_rider.md` | design done | — |
-| Trend Rider EA | `ea/strategies/boom_trend_rider/BoomTrendRider_v0.mq5` | code done, not compiled/tested | MT5 compile + Phase C backtest |
+| Trend Rider EA | `ea/strategies/boom_trend_rider/BoomTrendRider_v1.mq5` | hardened v1.00 (guards, persistence, kill-switch); not compiled/tested | MT5 compile + Phase C backtest |
 | v1.1 EA skeleton | `ea/strategies/boom_delta_lock_ai_recovery/BoomDeltaLockAIRecovery_v1_1.mq5` | code done, AI safe-stubbed | MT5 compile + model + Phase C |
 | AI I/O contract | `ea/strategies/boom_delta_lock_ai_recovery/ai/FEATURES.md` | fixed | — |
 | AI trainer | `ea/strategies/boom_delta_lock_ai_recovery/ai/train_direction_model.py` | runnable given data | real BOOM_100 data |

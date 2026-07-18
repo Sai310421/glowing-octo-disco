@@ -5,7 +5,8 @@ BOOM_100, MT5 mobile, M1) that also seeded `boom_drift_grid.md`.
 Relation: sibling of `boom_drift_grid.md` (v0). The drift grid is a *drift-biased simplification*;
 this packet captures what the video actually shows: a **symmetric, always-in, stop-and-reverse
 trend rider**. Delta Lock (`boom_delta_lock_ai_recovery.md`) is reused as the sudden-change guard.
-Status: Design packet + v0 EA. Not compiled, not backtested, not deployable (Rules 3/7).
+Status: Design packet + hardened v1.00 EA (production guards; see the EA README).
+Not compiled, not backtested, not deployable (Rules 3/7).
 
 ## Summary
 
@@ -78,7 +79,7 @@ ride logic). Windows are broker-server time, `HH:MM-HH:MM;...` format.
 - [ ] Confirm no secrets or destructive commands are included
 - [ ] Generate the NotebookLM Summary section
 - [ ] Draft SNS / content ideas where applicable
-- [ ] Compile `BoomTrendRider_v0.mq5` in MetaEditor; fix any errors
+- [ ] Compile `BoomTrendRider_v1.mq5` in MetaEditor; fix any errors
 - [ ] Phase C: backtest on Deriv BOOM_100 tick/M1, realistic spread; compare vs BoomDriftGrid v0
 - [ ] Sweep: Δ_min ∈ {30,50,100} × w_range ∈ {1.5,2,3} × er thresholds × N_max ∈ {5,7,10}
 - [ ] Measure whipsaw cost in ranges with w_range=1 (control) to verify the "widen" decision
