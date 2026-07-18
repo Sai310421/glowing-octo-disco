@@ -48,6 +48,23 @@ auto-calibration and a dynamic ATR trail.
   and unaffected.
 - `InpAutoTimeframe=false` + `InpTimeframe` gives a fixed manual timeframe.
 
+**MQL5 economic calendar** (v1.30, `InpUseCalendar`, default ON):
+- The built-in MT5 calendar (`CalendarValueHistory`/`CalendarEventById`)
+  is polled every `InpCalRefreshMin` minutes for events of at least
+  `InpCalMinImportance` (default HIGH — CPI/NFP/FOMC tier) in the symbol's
+  currencies (`InpCalCurrencies="auto"` derives them from the symbol; XAUUSD
+  → USD). Each event opens a news window from `InpCalPreMin` before to
+  `InpCalPostMin` after, handled by the same `InpNewsMode` action
+  (FLATTEN default / LOCK / STRADDLE). Manual `InpNewsWindows` ranges
+  still work and are OR-ed in.
+- Status line shows a countdown (`news in Xm`) when an event is near.
+- **Honest limits**: the calendar API returns nothing in the Strategy
+  Tester and needs a terminal connected to MetaQuotes — the EA logs one
+  warning and falls back to manual windows there. Backtests therefore do
+  NOT include calendar behaviour; validate news handling on demo, or via
+  manual windows in the tester. For synthetics (BOOM_100) set
+  `InpNewsMode=NEWS_OFF`.
+
 **Dynamic ATR trail** (`InpTrailMode = TRAIL_ATR`, default):
 - Chandelier-style: the reverse stop sits `InpTrailAtrMult × ATR` behind the
   **best price of the current leg** and only ever tightens. Volatility

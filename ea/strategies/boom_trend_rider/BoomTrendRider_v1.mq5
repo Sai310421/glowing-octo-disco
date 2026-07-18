@@ -35,8 +35,15 @@
 //|  periodically with hysteresis, and rebuilds its indicators when  |
 //|  it steps up or down. Manual timeframe override remains.         |
 //+------------------------------------------------------------------+
+//|  v1.30: MQL5 economic-calendar integration. High-importance      |
+//|  events for the symbol's currencies open news windows            |
+//|  automatically (pre/post margins), on top of the manual          |
+//|  HH:MM-HH:MM windows. The calendar API yields nothing in the     |
+//|  Strategy Tester or offline - the EA logs one warning and        |
+//|  degrades to manual windows there.                               |
+//+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.20"
+#property version   "1.30"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -55,7 +62,7 @@ enum ENUM_RIDER_STATE
 
 enum ENUM_NEWS_MODE
   {
-   NEWS_OFF = 0,      // BOOM_100 synthetic: no calendar (default)
+   NEWS_OFF = 0,      // no news handling (use for synthetics like BOOM_100)
    NEWS_FLATTEN,      // close all before the window, halt inside
    NEWS_LOCK,         // delta-lock through the window
    NEWS_STRADDLE      // wide stop pair to harvest the announcement move
@@ -113,11 +120,19 @@ input int    InpMinStackToLock = 2;    // lock only when stack >= this
 input double InpLockTolLots   = 0.02;  // lock vs stack volume tolerance (lots)
 input int    InpLockRebalMax  = 3;     // rebalance attempts before Emergency
 
-input group "News windows (packet: decision 4; server time)"
-input ENUM_NEWS_MODE InpNewsMode = NEWS_OFF; // separate logic, default OFF
-input string InpNewsWindows   = "";    // "HH:MM-HH:MM;HH:MM-HH:MM" (server time)
-input int    InpNewsPreMin    = 5;     // act this many minutes before each window
+input group "News handling (packet: decision 4)"
+input ENUM_NEWS_MODE InpNewsMode = NEWS_FLATTEN; // action for news windows (OFF for synthetics)
+input string InpNewsWindows   = "";    // extra manual windows "HH:MM-HH:MM;..." (server time)
+input int    InpNewsPreMin    = 5;     // manual windows: act N minutes before
 input double InpNewsStraddleK = 2.0;   // k_news: straddle distance = k * Delta_t
+
+input group "Economic calendar (MQL5 built-in; v1.30)"
+input bool   InpUseCalendar   = true;  // auto news windows from the MT5 calendar
+input ENUM_CALENDAR_EVENT_IMPORTANCE InpCalMinImportance = CALENDAR_IMPORTANCE_HIGH; // minimum importance
+input string InpCalCurrencies = "auto";// "auto" = the symbol's currencies, or e.g. "USD,EUR"
+input int    InpCalPreMin     = 15;    // enter news mode N minutes before an event
+input int    InpCalPostMin    = 15;    // leave news mode N minutes after the event
+input int    InpCalRefreshMin = 30;    // refresh the event cache every N minutes
 
 input group "Account risk"
 input double InpMinMarginLevel = 800.0; // halt new exposure below this margin level %
@@ -158,6 +173,9 @@ double           g_effLot      = 0.0;    // auto-sized lot in effect
 int              g_effNMax     = 0;      // margin-capped stack limit in effect
 ENUM_TIMEFRAMES  g_tf          = PERIOD_M1; // working timeframe in effect
 datetime         g_tfNextReview = 0;     // next TF re-evaluation time
+datetime         g_calEvents[];          // cached event times (server time)
+datetime         g_calNextRefresh = 0;   // next calendar cache refresh
+bool             g_calWarned   = false;  // calendar-unavailable warning shown
 
 //+------------------------------------------------------------------+
 //| State persistence (survives terminal restarts)                   |
@@ -202,6 +220,7 @@ int OnInit()
       InpTrailStep <= 0.0 || InpPitchSpreadMult < 1.0 || InpSpreadSpikeMult < 1.0 ||
       InpSpikeAtrMult <= 0.0 || InpCalmAtrMult <= 0.0 || InpCalmAtrMult > InpSpikeAtrMult ||
       InpTfRangeSpreadMult < 1.0 || InpTfReviewMin < 1 ||
+      InpCalPreMin < 0 || InpCalPostMin < 0 || InpCalRefreshMin < 1 ||
       InpRiskPctPerFlip <= 0.0 || InpMaxMarginUsePct <= 0.0 || InpMaxMarginUsePct > 100.0 ||
       InpMagic == InpMagicLock)
      {
@@ -675,10 +694,12 @@ void PlaceOrMoveStop(const int type, const double target, const double lot,
 
 //+------------------------------------------------------------------+
 //| News windows (packet: decision 4 - separate logic)               |
+//| A window is either a manual HH:MM-HH:MM range or an MQL5         |
+//| economic-calendar event (v1.30) within pre/post minutes.         |
 //+------------------------------------------------------------------+
-bool InNewsWindow()
+bool InManualWindow()
   {
-   if(InpNewsMode == NEWS_OFF || StringLen(InpNewsWindows) == 0) return(false);
+   if(StringLen(InpNewsWindows) == 0) return(false);
    MqlDateTime st;
    TimeToStruct(TimeTradeServer(), st);
    int nowMin = st.hour * 60 + st.min;
@@ -697,6 +718,99 @@ bool InNewsWindow()
       else           { if(nowMin >= from || nowMin <= to) return(true); } // crosses midnight
      }
    return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| MQL5 economic calendar (v1.30)                                   |
+//| Caches upcoming event times for the relevant currencies. NOTE:   |
+//| the calendar API returns nothing in the Strategy Tester and      |
+//| needs a connected terminal - the EA degrades to manual windows   |
+//| and logs one warning in that case.                               |
+//+------------------------------------------------------------------+
+void CalCurrencies(string &curs[])
+  {
+   string raw = InpCalCurrencies;
+   StringTrimLeft(raw); StringTrimRight(raw);
+   if(raw == "" || raw == "auto")
+     {
+      string base   = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+      string profit = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+      string margin = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_MARGIN);
+      ArrayResize(curs, 0);
+      string cand[3]; cand[0] = base; cand[1] = profit; cand[2] = margin;
+      for(int i = 0; i < 3; i++)
+        {
+         if(StringLen(cand[i]) != 3) continue; // XAU etc. have no calendar; USD/EUR/JPY do
+         bool dup = false;
+         for(int j = 0; j < ArraySize(curs); j++) if(curs[j] == cand[i]) dup = true;
+         if(!dup) { int n = ArraySize(curs); ArrayResize(curs, n + 1); curs[n] = cand[i]; }
+        }
+      return;
+     }
+   StringSplit(raw, ',', curs);
+   for(int i = 0; i < ArraySize(curs); i++)
+     { StringTrimLeft(curs[i]); StringTrimRight(curs[i]); }
+  }
+
+void RefreshCalendar()
+  {
+   ArrayResize(g_calEvents, 0);
+   string curs[];
+   CalCurrencies(curs);
+   if(ArraySize(curs) == 0) return;
+
+   datetime from = TimeTradeServer() - (datetime)(InpCalPostMin * 60);
+   datetime to   = TimeTradeServer() + 48 * 3600;
+
+   for(int c = 0; c < ArraySize(curs); c++)
+     {
+      MqlCalendarValue vals[];
+      ResetLastError();
+      if(!CalendarValueHistory(vals, from, to, NULL, curs[c]))
+        {
+         if(!g_calWarned)
+           {
+            Print("BTR: calendar unavailable for '", curs[c], "' (err ", GetLastError(),
+                  ") - tester or disconnected terminal? Manual windows only.");
+            g_calWarned = true;
+           }
+         continue;
+        }
+      for(int i = 0; i < ArraySize(vals); i++)
+        {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(vals[i].event_id, ev)) continue;
+         if(ev.importance < InpCalMinImportance) continue;
+         int n = ArraySize(g_calEvents);
+         ArrayResize(g_calEvents, n + 1);
+         g_calEvents[n] = vals[i].time; // server time per the calendar contract
+        }
+     }
+  }
+
+bool InCalendarWindow()
+  {
+   if(!InpUseCalendar) return(false);
+   datetime now = TimeTradeServer();
+   for(int i = 0; i < ArraySize(g_calEvents); i++)
+      if(now >= g_calEvents[i] - InpCalPreMin * 60 &&
+         now <= g_calEvents[i] + InpCalPostMin * 60) return(true);
+   return(false);
+  }
+
+// minutes until the next cached event (-1 when none within the cache)
+int NextCalEventMin()
+  {
+   datetime now = TimeTradeServer(); datetime best = 0;
+   for(int i = 0; i < ArraySize(g_calEvents); i++)
+      if(g_calEvents[i] > now && (best == 0 || g_calEvents[i] < best)) best = g_calEvents[i];
+   return(best == 0 ? -1 : (int)((best - now) / 60));
+  }
+
+bool InNewsWindow()
+  {
+   if(InpNewsMode == NEWS_OFF) return(false);
+   return(InManualWindow() || InCalendarWindow());
   }
 
 // returns true when normal riding must not run this tick
@@ -1134,7 +1248,7 @@ void ShowStatus()
    if(!InpShowComment) return;
    string tfs = EnumToString(g_tf);
    StringReplace(tfs, "PERIOD_", "");
-   string line = "BoomTrendRider v1.20 " + _Symbol + " " + tfs +
+   string line = "BoomTrendRider v1.30 " + _Symbol + " " + tfs +
       "  |  " + StateName(g_state) + " " + (g_dir > 0 ? "LONG" : (g_dir < 0 ? "SHORT" : "-")) +
       "  |  stack " + IntegerToString(CountPos(InpMagic, (g_dir > 0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL)) +
       "/" + IntegerToString(EffNMax()) +
@@ -1146,6 +1260,8 @@ void ShowStatus()
       "  lev 1:" + IntegerToString((int)AccountInfoInteger(ACCOUNT_LEVERAGE)) +
       "  |  eq " + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) +
       " (peak " + DoubleToString(g_eqPeak, 2) + ")";
+   int nm = NextCalEventMin();
+   if(nm >= 0 && nm <= 180) line += "  |  news in " + IntegerToString(nm) + "m";
    Comment(line);
   }
 
@@ -1157,6 +1273,11 @@ void OnTick()
      {
       SelectTimeframe();    // broker-adaptive working timeframe
       g_tfNextReview = TimeCurrent() + (datetime)(InpTfReviewMin * 60);
+     }
+   if(InpUseCalendar && InpNewsMode != NEWS_OFF && TimeCurrent() >= g_calNextRefresh)
+     {
+      RefreshCalendar();    // MQL5 economic calendar cache
+      g_calNextRefresh = TimeCurrent() + (datetime)(InpCalRefreshMin * 60);
      }
    UpdateRegimeAndPitch();  // per-bar: regime, pitch, ATR, lot/N_max sizing
 
