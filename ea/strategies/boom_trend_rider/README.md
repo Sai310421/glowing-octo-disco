@@ -35,6 +35,19 @@ auto-calibration and a dynamic ATR trail.
   `InpAutoCalibrate=false`.
 - Trail re-pricing step also auto-scales (fraction of ATR/spread).
 
+**Broker-adaptive timeframe** (v1.20, `InpAutoTimeframe`, default ON):
+- The EA no longer cares which chart timeframe it is attached to. It walks the
+  ladder M1→M5→M15→M30→H1→H4 and picks the **fastest timeframe whose average
+  bar range clears `InpTfRangeSpreadMult × avgSpread`** — on a wide-spread
+  broker the bars of a too-fast timeframe are smaller than the cost of
+  crossing the spread, so pitch and trail would degenerate into churn.
+- The choice is re-checked every `InpTfReviewMin` minutes; stepping back down
+  to a faster timeframe requires a 30% margin (hysteresis) so the EA does not
+  flap between timeframes intra-session. On a switch, indicators are rebuilt
+  and pitch/regime/sizing recompute; open positions and stops are price-based
+  and unaffected.
+- `InpAutoTimeframe=false` + `InpTimeframe` gives a fixed manual timeframe.
+
 **Dynamic ATR trail** (`InpTrailMode = TRAIL_ATR`, default):
 - Chandelier-style: the reverse stop sits `InpTrailAtrMult × ATR` behind the
   **best price of the current leg** and only ever tightens. Volatility

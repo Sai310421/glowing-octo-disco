@@ -28,8 +28,15 @@
 //|  P10, Rules 3/4) and a human approves (Layer 12). Needs an MT5   |
 //|  compile pass (no MetaEditor here).                              |
 //+------------------------------------------------------------------+
+//|  v1.20: broker-adaptive timeframe. The EA no longer depends on    |
+//|  the chart timeframe: it picks the working timeframe itself as    |
+//|  the fastest one whose average bar range clears a multiple of    |
+//|  the measured spread (cost-noise floor), reviews the choice      |
+//|  periodically with hysteresis, and rebuilds its indicators when  |
+//|  it steps up or down. Manual timeframe override remains.         |
+//+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.10"
+#property version   "1.20"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -68,10 +75,16 @@ input bool   InpAutoLot       = true;  // size lot from equity/risk (else InpLot
 input double InpRiskPctPerFlip = 0.5;  // auto lot: % equity lost on one false flip
 input double InpMaxMarginUsePct = 30.0;// full stack margin cap, % of equity
 
+input group "Timeframe auto-selection"
+input bool   InpAutoTimeframe = true;  // pick the working TF from spread vs bar range
+input ENUM_TIMEFRAMES InpTimeframe = PERIOD_CURRENT; // manual TF when auto is off
+input double InpTfRangeSpreadMult = 6.0; // require avg bar range >= mult * spread
+input int    InpTfReviewMin   = 60;    // re-check the TF choice every N minutes
+
 input group "Pitch / regime (packet: decision 1)"
 input double InpDeltaMin      = 0.0;   // Delta_min: pitch floor, price units (0 = auto from spread)
 input double InpAtrMult       = 1.0;   // c_atr: pitch = max(floor, c_atr*ATR)
-input int    InpAtrPeriod     = 14;    // ATR period (M1 closed bars)
+input int    InpAtrPeriod     = 14;    // ATR period (closed bars of the working TF)
 input int    InpERPeriod      = 20;    // Kaufman ER lookback (bars)
 input double InpERRangeBelow  = 0.30;  // er_lo: ER below => RANGE regime
 input double InpERTrendAbove  = 0.45;  // er_hi: ER above => TREND regime
@@ -143,6 +156,8 @@ double           g_spreadEMA   = 0.0;    // measured broker spread, price units
 double           g_legExt      = 0.0;    // best price of the current leg (ATR trail anchor)
 double           g_effLot      = 0.0;    // auto-sized lot in effect
 int              g_effNMax     = 0;      // margin-capped stack limit in effect
+ENUM_TIMEFRAMES  g_tf          = PERIOD_M1; // working timeframe in effect
+datetime         g_tfNextReview = 0;     // next TF re-evaluation time
 
 //+------------------------------------------------------------------+
 //| State persistence (survives terminal restarts)                   |
@@ -186,6 +201,7 @@ int OnInit()
       InpLockTolLots < 0.0 || InpNewsPreMin < 0 || InpNewsStraddleK <= 0.0 ||
       InpTrailStep <= 0.0 || InpPitchSpreadMult < 1.0 || InpSpreadSpikeMult < 1.0 ||
       InpSpikeAtrMult <= 0.0 || InpCalmAtrMult <= 0.0 || InpCalmAtrMult > InpSpikeAtrMult ||
+      InpTfRangeSpreadMult < 1.0 || InpTfReviewMin < 1 ||
       InpRiskPctPerFlip <= 0.0 || InpMaxMarginUsePct <= 0.0 || InpMaxMarginUsePct > 100.0 ||
       InpMagic == InpMagicLock)
      {
@@ -207,7 +223,9 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(_Symbol);
-   g_hATR = iATR(_Symbol, PERIOD_CURRENT, InpAtrPeriod);
+   g_tf = InpAutoTimeframe ? PERIOD_M1
+        : ((InpTimeframe == PERIOD_CURRENT) ? (ENUM_TIMEFRAMES)Period() : InpTimeframe);
+   g_hATR = iATR(_Symbol, g_tf, InpAtrPeriod);
    if(g_hATR == INVALID_HANDLE) return(INIT_FAILED);
 
    LoadState();
@@ -427,22 +445,83 @@ double NormVol(double v)
   }
 
 //+------------------------------------------------------------------+
+//| Broker-adaptive timeframe (v1.20)                                |
+//| A TF is usable when its average bar range clears a multiple of   |
+//| the measured spread - otherwise cost/noise dominates every bar   |
+//| and the pitch/trail degenerate into spread-churn. The EA picks   |
+//| the fastest usable TF, re-checks periodically, and only steps    |
+//| back down with a hysteresis margin so it does not flap.          |
+//+------------------------------------------------------------------+
+double AvgBarRange(const ENUM_TIMEFRAMES tf, const int nBars)
+  {
+   int have = Bars(_Symbol, tf);
+   int n = MathMin(nBars, have - 1);
+   if(n < 10) return(0.0); // not enough history to judge this TF
+   double sum = 0.0;
+   for(int i = 1; i <= n; i++)
+      sum += iHigh(_Symbol, tf, i) - iLow(_Symbol, tf, i);
+   return(sum / n);
+  }
+
+void ApplyTimeframe(const ENUM_TIMEFRAMES tf)
+  {
+   if(tf == g_tf) return;
+   int h = iATR(_Symbol, tf, InpAtrPeriod);
+   if(h == INVALID_HANDLE) { Print("BTR: iATR failed for ", EnumToString(tf), " - keeping ", EnumToString(g_tf)); return; }
+   if(g_hATR != INVALID_HANDLE) IndicatorRelease(g_hATR);
+   g_hATR      = h;
+   Print("BTR: working timeframe ", EnumToString(g_tf), " -> ", EnumToString(tf),
+         " (avg range vs spread ", DoubleToString(g_spreadEMA, _Digits), ")");
+   g_tf        = tf;
+   g_regimeBar = 0;    // force regime/pitch/sizing recompute on the new TF
+   g_atrCache  = 0.0;
+   g_pitchCache = 0.0;
+  }
+
+void SelectTimeframe()
+  {
+   if(!InpAutoTimeframe || g_spreadEMA <= 0.0) return;
+   static ENUM_TIMEFRAMES ladder[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4};
+   int nlad = ArraySize(ladder);
+
+   int cur = 0;
+   for(int i = 0; i < nlad; i++) if(ladder[i] == g_tf) { cur = i; break; }
+
+   double need = InpTfRangeSpreadMult * g_spreadEMA;
+   int best = nlad - 1; // fallback: slowest ladder step
+   for(int i = 0; i < nlad; i++)
+     {
+      double r = AvgBarRange(ladder[i], 100);
+      if(r <= 0.0) continue; // no data for this TF yet: skip
+      if(r >= need) { best = i; break; } // fastest TF that clears the cost floor
+     }
+
+   if(best > cur)                                    // too noisy/costly: step up now
+      ApplyTimeframe(ladder[best]);
+   else if(best < cur)                               // faster TF viable: step down
+     {                                               // only with a 30% margin (hysteresis)
+      double r = AvgBarRange(ladder[best], 100);
+      if(r >= 1.3 * need) ApplyTimeframe(ladder[best]);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Regime / pitch (packet: decision 1 - WIDEN in range)             |
-//| Recomputed once per closed M1 bar.                               |
+//| Recomputed once per closed bar of the working timeframe.         |
 //+------------------------------------------------------------------+
 double EfficiencyRatio()
   {
    int n = MathMax(2, InpERPeriod);
-   double num = MathAbs(iClose(_Symbol, PERIOD_CURRENT, 1) - iClose(_Symbol, PERIOD_CURRENT, n));
+   double num = MathAbs(iClose(_Symbol, g_tf, 1) - iClose(_Symbol, g_tf, n));
    double den = 0.0;
    for(int i = 1; i < n; i++)
-      den += MathAbs(iClose(_Symbol, PERIOD_CURRENT, i) - iClose(_Symbol, PERIOD_CURRENT, i + 1));
+      den += MathAbs(iClose(_Symbol, g_tf, i) - iClose(_Symbol, g_tf, i + 1));
    return(den > 0.0 ? num / den : 1.0);
   }
 
 void UpdateRegimeAndPitch()
   {
-   datetime bar = iTime(_Symbol, PERIOD_CURRENT, 0);
+   datetime bar = iTime(_Symbol, g_tf, 0);
    if(bar == g_regimeBar && g_pitchCache > 0.0) return;
    g_regimeBar = bar;
 
@@ -543,8 +622,8 @@ int    EffNMax() { return(g_effNMax > 0   ? g_effNMax : 0); }
 double Velocity()
   {
    int tau = MathMax(1, InpSpikeLookback);
-   double now  = iClose(_Symbol, PERIOD_CURRENT, 0);
-   double past = iClose(_Symbol, PERIOD_CURRENT, tau);
+   double now  = iClose(_Symbol, g_tf, 0);
+   double past = iClose(_Symbol, g_tf, tau);
    if(now == 0.0 || past == 0.0) return(0.0);
    return((now - past) / tau); // signed: + = up, - = down
   }
@@ -1053,7 +1132,9 @@ string StateName(const ENUM_RIDER_STATE s)
 void ShowStatus()
   {
    if(!InpShowComment) return;
-   string line = "BoomTrendRider v1.10 " + _Symbol +
+   string tfs = EnumToString(g_tf);
+   StringReplace(tfs, "PERIOD_", "");
+   string line = "BoomTrendRider v1.20 " + _Symbol + " " + tfs +
       "  |  " + StateName(g_state) + " " + (g_dir > 0 ? "LONG" : (g_dir < 0 ? "SHORT" : "-")) +
       "  |  stack " + IntegerToString(CountPos(InpMagic, (g_dir > 0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL)) +
       "/" + IntegerToString(EffNMax()) +
@@ -1072,6 +1153,11 @@ void ShowStatus()
 void OnTick()
   {
    UpdateSpreadStats();     // broker spread auto-detection (EMA)
+   if(InpAutoTimeframe && TimeCurrent() >= g_tfNextReview)
+     {
+      SelectTimeframe();    // broker-adaptive working timeframe
+      g_tfNextReview = TimeCurrent() + (datetime)(InpTfReviewMin * 60);
+     }
    UpdateRegimeAndPitch();  // per-bar: regime, pitch, ATR, lot/N_max sizing
 
    if(HandleAccountRisk()) { ShowStatus(); return; } // KILLED / HALT-DAY own the tick
