@@ -5,8 +5,17 @@ BOOM_100, MT5 mobile, M1) that also seeded `boom_drift_grid.md`.
 Relation: sibling of `boom_drift_grid.md` (v0). The drift grid is a *drift-biased simplification*;
 this packet captures what the video actually shows: a **symmetric, always-in, stop-and-reverse
 trend rider**. Delta Lock (`boom_delta_lock_ai_recovery.md`) is reused as the sudden-change guard.
-Status: Design packet + hardened v1.00 EA (production guards; see the EA README).
+Status: Design packet + hardened EA (v1.00 production guards, v1.10 multi-symbol
+auto-calibration + dynamic ATR trail; see the EA README).
 Not compiled, not backtested, not deployable (Rules 3/7).
+
+v1.10 addendum (XAUUSD port): the mechanism is unchanged; all thresholds that
+were BOOM-scale absolutes become broker-derived — pitch floor and entry gate
+from a measured spread EMA, lot/N_max from equity + leverage via OrderCalcMargin,
+spike velocities in ATR multiples, and the reverse stop optionally trails
+chandelier-style at k·ATR behind the leg's best price. On real symbols the news
+module stops being optional: gold gaps on CPI/NFP/FOMC, so FLATTEN or LOCK
+windows are part of the deployment config, and Phase C must be re-run per symbol.
 
 ## Summary
 

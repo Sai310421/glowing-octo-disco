@@ -2,10 +2,11 @@
 
 Implements `docs/inbox/boom_trend_rider.md` — the **video-faithful** reproduction
 of the TikTok clip mechanism: a symmetric, always-in, stop-and-reverse trend
-rider for Deriv **BOOM_100** on **M1**. Rides each leg with an equal-lot pyramid,
-keeps one opposite stop trailed with price at all times, banks the ladder on
-every flip. v1.00 is the production-hardened build (same bar as the v1.11
-Delta Lock hardening pass).
+rider on **M1**. Rides each leg with an equal-lot pyramid, keeps one opposite
+stop trailed with price at all times, banks the ladder on every flip. v1.00 is
+the production-hardened build (same bar as the v1.11 Delta Lock hardening
+pass); **v1.10 makes it multi-symbol (XAUUSD-ready)** with broker
+auto-calibration and a dynamic ATR trail.
 
 > Code-complete, but **not compiled and not backtested** — there is no
 > MetaTrader here. Compile in MetaEditor 5, run the Phase C backtest, and get
@@ -13,6 +14,39 @@ Delta Lock hardening pass).
 
 ## Files
 - `BoomTrendRider_v1.mq5` — the Expert Advisor.
+
+## v1.10 — XAUUSD / multi-symbol additions
+
+**Broker auto-calibration** (`InpAutoCalibrate`, default ON):
+- **Spread detection**: the EA maintains an EMA of the live ask−bid spread.
+  The pitch floor becomes `max(InpDeltaMin, InpPitchSpreadMult × avgSpread)`
+  and new exposure is skipped whenever the current spread blows out past
+  `InpSpreadSpikeMult × avgSpread` (news, rollover, thin liquidity) — no
+  hand-tuned point values per broker.
+- **Leverage/margin adaptation**: lot size is derived from equity and
+  `InpRiskPctPerFlip` (the % of equity one false flip may cost), then the
+  full-stack margin is checked against `InpMaxMarginUsePct` of equity using
+  `OrderCalcMargin` (which reflects the account's real leverage and the
+  symbol's margin rate). The stack cap `N_max` — and if necessary the lot —
+  are reduced automatically until the worst case fits.
+- **Spike thresholds in ATR units**: `InpSpikeAtrMult` / `InpCalmAtrMult`
+  replace the fixed price-unit velocities, so the delta lock works on gold,
+  indices, or BOOM alike. Manual price-unit inputs remain for
+  `InpAutoCalibrate=false`.
+- Trail re-pricing step also auto-scales (fraction of ATR/spread).
+
+**Dynamic ATR trail** (`InpTrailMode = TRAIL_ATR`, default):
+- Chandelier-style: the reverse stop sits `InpTrailAtrMult × ATR` behind the
+  **best price of the current leg** and only ever tightens. Volatility
+  expansion widens the distance for new legs; contraction hugs the trend.
+  `TRAIL_PITCH` keeps the v1.00 fixed-multiple-of-pitch behaviour.
+- The trail distance is floored at `InpPitchSpreadMult × avgSpread` so the
+  stop can never sit inside the broker's cost band.
+
+Recommended XAUUSD starting point: defaults as shipped (auto ON, TRAIL_ATR,
+risk 0.5%/flip), `InpNewsMode=NEWS_FLATTEN` or `NEWS_LOCK` with the day's
+red-calendar windows in `InpNewsWindows` — unlike BOOM, gold gaps hard on
+CPI/NFP/FOMC. All prices are in the symbol's own chart units.
 
 ## Production hardening (v1.00)
 - **Two-step flip** (`ST_FLIP`): the reverse-stop fill flips the direction
