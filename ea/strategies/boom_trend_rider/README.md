@@ -48,6 +48,20 @@ auto-calibration and a dynamic ATR trail.
   and unaffected.
 - `InpAutoTimeframe=false` + `InpTimeframe` gives a fixed manual timeframe.
 
+**Close-confirmed entries — no wick fills** (v1.31, `InpEntryOnClose`, default ON):
+- Seeds, stack adds, the trail anchor and (by default) the flip decision are
+  taken on **closed bars** of the working timeframe. An intrabar wick poking
+  one pitch ahead — or through the trail level — triggers nothing; only a
+  bar that *closes* there does.
+- Seeding while flat is close-based too: a bar must close one pitch beyond
+  the running extreme of closes since going flat (no resting straddle stops
+  in this mode).
+- `InpFlipMode=FLIP_STOP_ORDER` restores the video-style resting reverse
+  stop (which by nature fills on wicks); `FLIP_ON_CLOSE` (default) carries a
+  trade-off: between bar closes there is no resting order in the market, so
+  the fast guard against a crash is the tick-based velocity delta-lock, and
+  a gap through the trail is realized at the close-side price.
+
 **MQL5 economic calendar** (v1.30, `InpUseCalendar`, default ON):
 - The built-in MT5 calendar (`CalendarValueHistory`/`CalendarEventById`)
   is polled every `InpCalRefreshMin` minutes for events of at least

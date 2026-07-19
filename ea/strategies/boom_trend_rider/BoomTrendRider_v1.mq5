@@ -35,6 +35,13 @@
 //|  periodically with hysteresis, and rebuilds its indicators when  |
 //|  it steps up or down. Manual timeframe override remains.         |
 //+------------------------------------------------------------------+
+//|  v1.31: close-confirmed entries (no wick fills). Seed, stack     |
+//|  adds, the trail anchor and (by default) the flip decision are   |
+//|  all taken on CLOSED bars of the working timeframe - intrabar    |
+//|  wicks never trigger an entry. The video-style resting reverse   |
+//|  stop remains available via InpFlipMode=FLIP_STOP_ORDER; the     |
+//|  velocity delta-lock stays tick-based as the crash guard.        |
+//+------------------------------------------------------------------+
 //|  v1.30: MQL5 economic-calendar integration. High-importance      |
 //|  events for the symbol's currencies open news windows            |
 //|  automatically (pre/post margins), on top of the manual          |
@@ -43,7 +50,7 @@
 //|  degrades to manual windows there.                               |
 //+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.30"
+#property version   "1.31"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -72,6 +79,12 @@ enum ENUM_TRAIL_MODE
   {
    TRAIL_PITCH = 0,  // reverse stop at RevDistMult * pitch behind price
    TRAIL_ATR         // chandelier: k*ATR behind the best price of the leg
+  };
+
+enum ENUM_FLIP_MODE
+  {
+   FLIP_ON_CLOSE = 0, // flip when a bar CLOSES beyond the trail (no wick fills)
+   FLIP_STOP_ORDER    // video-style resting stop order (fills on wicks)
   };
 
 input group "Broker auto-calibration (XAUUSD-ready)"
@@ -103,6 +116,10 @@ input double InpLot           = 0.01;  // L: manual lot when InpAutoLot=false
 input int    InpNMax          = 10;    // N_max: max stacked positions (may be auto-reduced)
 input bool   InpUsePerPosTP   = false; // optional per-position TP (video: OFF = pure SAR)
 input double InpCtp           = 3.0;   // per-position TP = c_tp * Delta_t
+
+input group "Entry confirmation (v1.31 - no wick entries)"
+input bool   InpEntryOnClose  = true;  // seed/stack only on CLOSED bars (wicks ignored)
+input ENUM_FLIP_MODE InpFlipMode = FLIP_ON_CLOSE; // flip on bar close (default) or resting stop
 
 input group "Dynamic ATR trail (reverse stop)"
 input ENUM_TRAIL_MODE InpTrailMode = TRAIL_ATR; // pitch-based or chandelier ATR trail
@@ -176,6 +193,10 @@ datetime         g_tfNextReview = 0;     // next TF re-evaluation time
 datetime         g_calEvents[];          // cached event times (server time)
 datetime         g_calNextRefresh = 0;   // next calendar cache refresh
 bool             g_calWarned   = false;  // calendar-unavailable warning shown
+datetime         g_entryBar    = 0;      // closed-bar gate for entry decisions
+double           g_flatHi      = 0.0;    // highest close while FLAT (close-based seed)
+double           g_flatLo      = 0.0;    // lowest close while FLAT
+double           g_trailLevel  = 0.0;    // tighten-only trail level (close-based flip)
 
 //+------------------------------------------------------------------+
 //| State persistence (survives terminal restarts)                   |
@@ -192,6 +213,7 @@ void SaveState()
    GlobalVariableSet(GV("dayEq"),   g_dayStartEq);
    GlobalVariableSet(GV("dayStamp"),(double)g_dayStamp);
    GlobalVariableSet(GV("legExt"),  g_legExt);
+   GlobalVariableSet(GV("trail"),   g_trailLevel);
   }
 
 void LoadState()
@@ -205,6 +227,7 @@ void LoadState()
    g_dayStartEq = GlobalVariableGet(GV("dayEq"));
    g_dayStamp   = (int)GlobalVariableGet(GV("dayStamp"));
    g_legExt     = GlobalVariableGet(GV("legExt"));
+   g_trailLevel = GlobalVariableGet(GV("trail"));
   }
 
 //+------------------------------------------------------------------+
@@ -840,7 +863,7 @@ bool HandleNews()
          DeletePendings();
          g_state = ST_RIDE;
         }
-      else { g_dir = 0; g_state = ST_FLAT; }
+      else { g_dir = 0; ResetFlatTrackers(); g_state = ST_FLAT; }
       SaveState();
       return(false);
      }
@@ -929,7 +952,7 @@ bool HandleAccountRisk()
      {
       g_dayStamp   = stamp;
       g_dayStartEq = eq;
-      if(g_state == ST_HALT_DAY) g_state = ST_FLAT;
+      if(g_state == ST_HALT_DAY) { ResetFlatTrackers(); g_state = ST_FLAT; }
       SaveState();
      }
    if(g_state != ST_HALT_DAY && InpMaxDailyLossPct > 0.0 && g_dayStartEq > 0.0 &&
@@ -949,23 +972,90 @@ bool HandleAccountRisk()
    return(false);
   }
 
+// reset per-leg / per-flat trackers when exposure ends
+void ResetFlatTrackers()
+  {
+   g_flatHi     = 0.0;
+   g_flatLo     = 0.0;
+   g_trailLevel = 0.0;
+   g_legExt     = 0.0;
+  }
+
+// true once per closed bar of the working timeframe (entry decisions only)
+bool NewEntryBar()
+  {
+   datetime t = iTime(_Symbol, g_tf, 0);
+   if(t == 0 || t == g_entryBar) return(false);
+   g_entryBar = t;
+   return(true);
+  }
+
 //+------------------------------------------------------------------+
-//| FLAT: straddle seed - first fill decides the direction           |
+//| FLAT: seed the first position of a leg                           |
+//| InpEntryOnClose=true (default): CLOSE-based - a bar must CLOSE   |
+//| one pitch beyond the running extreme of closes since going flat; |
+//| wicks never trigger anything.                                    |
+//| InpEntryOnClose=false: video-style resting stop straddle         |
+//| (fills on wicks by nature).                                      |
 //+------------------------------------------------------------------+
+void SeedRide(const int dir)
+  {
+   double lot = EffLot();
+   ENUM_ORDER_TYPE ot = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(!MarginForLot(ot, lot)) return;
+   bool ok = (dir > 0) ? trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "BTR seed")
+                       : trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "BTR seed");
+   if(!ok) { Backoff("seed"); return; }
+   double px = (dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                         : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   g_dir        = dir;
+   g_lastAdd    = px;
+   g_legExt     = px;
+   g_trailLevel = 0.0;
+   g_flatHi     = 0.0;
+   g_flatLo     = 0.0;
+   DeletePendings();
+   g_state = ST_RIDE;
+   SaveState();
+  }
+
 void ManageFlat()
   {
-   int dir = NewestDir();
+   int dir = NewestDir(); // a pending seed stop filled (stop-order mode)
    if(dir != 0)
      {
-      g_dir     = dir;
-      g_lastAdd = ExtremeEntry(g_dir);
-      g_legExt  = g_lastAdd; // new leg: reset the ATR-trail anchor
-      DeletePendings(); // leftover seed stop; a fresh reverse stop is armed in RIDE
-      g_state   = ST_RIDE;
+      g_dir        = dir;
+      g_lastAdd    = ExtremeEntry(g_dir);
+      g_legExt     = g_lastAdd; // new leg: reset the ATR-trail anchor
+      g_trailLevel = 0.0;
+      DeletePendings(); // leftover seed stop; the reverse arms in RIDE
+      g_state      = ST_RIDE;
       SaveState();
       return;
      }
    if(EffNMax() < 1) return; // margin cap leaves no room for even one level
+
+   if(InpEntryOnClose)
+     {
+      if(!NewEntryBar()) return;
+      double c = iClose(_Symbol, g_tf, 1);
+      if(c <= 0.0) return;
+      double dpitch = PitchNow();
+      // trigger on the extremes of PRIOR closes, then fold this close in
+      bool seeded = false;
+      if(CanAddExposure())
+        {
+         if(g_flatLo > 0.0 && c >= g_flatLo + dpitch)      { SeedRide(+1); seeded = true; }
+         else if(g_flatHi > 0.0 && c <= g_flatHi - dpitch) { SeedRide(-1); seeded = true; }
+        }
+      if(!seeded)
+        {
+         if(g_flatHi <= 0.0 || c > g_flatHi) g_flatHi = c;
+         if(g_flatLo <= 0.0 || c < g_flatLo) g_flatLo = c;
+        }
+      return;
+     }
+
    if(!CanAddExposure()) return;
    ManageStraddle(1.0, "BTR seed");
   }
@@ -981,23 +1071,40 @@ void ManageRide()
    // --- flip: the reverse stop filled (opposite-type position under ride magic)
    if(CountPos(InpMagic, oppType) > 0)
      {
-      g_dir   = -g_dir;         // the fill is seed #1 of the new ride
-      g_state = ST_FLIP;        // ST_FLIP closes the old stack, then resumes
+      g_dir        = -g_dir;    // the fill is seed #1 of the new ride
+      g_trailLevel = 0.0;
+      g_state      = ST_FLIP;   // ST_FLIP closes the old stack, then resumes
       DeletePendings();
       SaveState();
       return;
      }
 
-   if(CountPos(InpMagic, myType) == 0) { g_dir = 0; g_state = ST_FLAT; SaveState(); return; }
+   if(CountPos(InpMagic, myType) == 0)
+     { g_dir = 0; ResetFlatTrackers(); g_state = ST_FLAT; SaveState(); return; }
 
    double d   = PitchNow();
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double px  = (g_dir > 0) ? bid : ask;
 
+   // --- entry-bar gate: in close-confirmed mode all entry/flip/anchor
+   //     decisions run once per closed bar on its CLOSE; wicks are ignored
+   bool   barTurn  = (InpEntryOnClose || InpFlipMode == FLIP_ON_CLOSE) ? NewEntryBar() : false;
+   double barClose = iClose(_Symbol, g_tf, 1);
+
    // --- track the best price of the leg (anchor for the ATR trail)
-   if(g_legExt <= 0.0) g_legExt = px;
-   if((g_dir > 0 && px > g_legExt) || (g_dir < 0 && px < g_legExt)) g_legExt = px;
+   if(InpEntryOnClose)
+     {
+      if(g_legExt <= 0.0) g_legExt = px;
+      else if(barTurn && barClose > 0.0 &&
+              ((g_dir > 0 && barClose > g_legExt) || (g_dir < 0 && barClose < g_legExt)))
+         g_legExt = barClose; // closes only - wick extremes never tighten the trail
+     }
+   else
+     {
+      if(g_legExt <= 0.0) g_legExt = px;
+      if((g_dir > 0 && px > g_legExt) || (g_dir < 0 && px < g_legExt)) g_legExt = px;
+     }
 
    // --- delta lock on a velocity spike against the stack (decision 2)
    if(InpUseLock && CountPos(InpMagic, myType) >= InpMinStackToLock && OpsAllowed())
@@ -1023,40 +1130,69 @@ void ManageRide()
         }
      }
 
-   // --- stack: price advanced one pitch beyond the last add (with the trend)
+   bool   canStack = InpEntryOnClose
+                     ? (barTurn && barClose > 0.0 &&
+                        ((g_dir > 0 && barClose >= g_lastAdd + d) || (g_dir < 0 && barClose <= g_lastAdd - d)))
+                     : ((g_dir > 0 && px >= g_lastAdd + d) || (g_dir < 0 && px <= g_lastAdd - d));
+
+   // --- stack: one pitch of confirmed progress with the trend
    bool stackAllowed = !(g_rangeMode && InpRangeHaltStack);
-   if(stackAllowed && CanAddExposure() && CountPos(InpMagic, myType) < EffNMax())
+   if(stackAllowed && CanAddExposure() && CountPos(InpMagic, myType) < EffNMax() && canStack)
      {
-      if((g_dir > 0 && px >= g_lastAdd + d) || (g_dir < 0 && px <= g_lastAdd - d))
+      ENUM_ORDER_TYPE ot = (g_dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double lot = EffLot();
+      if(MarginForLot(ot, lot))
         {
-         ENUM_ORDER_TYPE ot = (g_dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-         double lot = EffLot();
-         if(MarginForLot(ot, lot))
-           {
-            bool ok = (g_dir > 0) ? trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "BTR stack")
-                                  : trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "BTR stack");
-            if(ok) { g_lastAdd = px; SaveState(); }
-            else Backoff("stack");
-           }
+         bool ok = (g_dir > 0) ? trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "BTR stack")
+                               : trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "BTR stack");
+         if(ok) { g_lastAdd = (InpEntryOnClose ? barClose : px); SaveState(); }
+         else Backoff("stack");
         }
      }
 
    // --- optional per-position TP ladder (default OFF: pure SAR like the video)
    if(InpUsePerPosTP) ManagePerPosTP(d);
 
-   // --- reverse stop: exactly one, trailed monotonically tighter (decision 3)
-   // TRAIL_ATR: chandelier - k*ATR behind the best price of the leg, so the
-   // distance breathes with volatility. TRAIL_PITCH: fixed multiple of pitch.
+   // --- trail level: chandelier (k*ATR behind the leg's best price) or
+   //     pitch-multiple; monotonically tighter, never loosened
    double dist   = TrailDistance();
    double anchor = (InpTrailMode == TRAIL_ATR && g_legExt > 0.0) ? g_legExt
                                                                  : ((g_dir > 0) ? bid : ask);
    double target = (g_dir > 0) ? NormalizeDouble(anchor - dist, _Digits)
                                : NormalizeDouble(anchor + dist, _Digits);
-   // a stop must stay on the far side of the market
-   if(g_dir > 0) target = MathMin(target, NormalizeDouble(bid - MinStopDist() - _Point, _Digits));
-   else          target = MathMax(target, NormalizeDouble(ask + MinStopDist() + _Point, _Digits));
-   if(g_dir > 0) PlaceOrMoveStop(ORDER_TYPE_SELL_STOP, target, EffLot(), "BTR reverse", true, +1);
-   else          PlaceOrMoveStop(ORDER_TYPE_BUY_STOP,  target, EffLot(), "BTR reverse", true, -1);
+   if(g_trailLevel <= 0.0) g_trailLevel = target;
+   else g_trailLevel = (g_dir > 0) ? MathMax(g_trailLevel, target) : MathMin(g_trailLevel, target);
+
+   if(InpFlipMode == FLIP_ON_CLOSE)
+     {
+      // no resting order: flip only when a bar CLOSES beyond the trail level.
+      // Wicks through the level do nothing; the velocity delta-lock remains
+      // the fast guard against crashes between closes.
+      DeletePendings(); // clear any leftover reverse stop (mode switch etc.)
+      if(barTurn && barClose > 0.0 && OpsAllowed() &&
+         ((g_dir > 0 && barClose <= g_trailLevel) || (g_dir < 0 && barClose >= g_trailLevel)))
+        {
+         double lot = EffLot();
+         bool ok = (g_dir > 0) ? trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "BTR flip")
+                               : trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "BTR flip");
+         if(ok)
+           {
+            g_dir        = -g_dir;   // the fill is seed #1 of the new ride
+            g_trailLevel = 0.0;
+            g_state      = ST_FLIP;  // ST_FLIP banks the old stack
+            SaveState();
+           }
+         else Backoff("flip");
+        }
+      return;
+     }
+
+   // FLIP_STOP_ORDER: video-style resting stop at the trail level
+   double stopTgt = g_trailLevel;
+   if(g_dir > 0) stopTgt = MathMin(stopTgt, NormalizeDouble(bid - MinStopDist() - _Point, _Digits));
+   else          stopTgt = MathMax(stopTgt, NormalizeDouble(ask + MinStopDist() + _Point, _Digits));
+   if(g_dir > 0) PlaceOrMoveStop(ORDER_TYPE_SELL_STOP, stopTgt, EffLot(), "BTR reverse", true, +1);
+   else          PlaceOrMoveStop(ORDER_TYPE_BUY_STOP,  stopTgt, EffLot(), "BTR reverse", true, -1);
   }
 
 void ManagePerPosTP(const double d)
@@ -1088,7 +1224,8 @@ void ManageFlip()
       return; // keep retrying until the old side is flat
      }
    int newType = (g_dir > 0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-   if(CountPos(InpMagic, newType) == 0) { g_dir = 0; g_state = ST_FLAT; SaveState(); return; }
+   if(CountPos(InpMagic, newType) == 0)
+     { g_dir = 0; ResetFlatTrackers(); g_state = ST_FLAT; SaveState(); return; }
    g_lastAdd = ExtremeEntry(g_dir);
    g_legExt  = g_lastAdd; // new leg: reset the ATR-trail anchor
    g_state   = ST_RIDE;
@@ -1104,7 +1241,8 @@ void ManageLocked()
 
    if(CountPos(InpMagicLock, -1) == 0) // lock leg gone (manual close?) -> resume
      {
-      g_state = (CountPos(InpMagic, -1) > 0) ? ST_RIDE : ST_FLAT;
+      if(CountPos(InpMagic, -1) > 0) { g_trailLevel = 0.0; g_legExt = 0.0; g_state = ST_RIDE; }
+      else                           { g_dir = 0; ResetFlatTrackers(); g_state = ST_FLAT; }
       SaveState();
       return;
      }
@@ -1143,9 +1281,10 @@ void ManageLocked()
      {
       // spike faded on the stack side: drop the hedge, keep riding
       ClosePositions(InpMagicLock, -1);
-      g_lastAdd = ExtremeEntry(g_dir);
-      g_legExt  = px; // re-anchor the ATR trail at the post-spike price
-      g_state   = ST_RIDE;
+      g_lastAdd    = ExtremeEntry(g_dir);
+      g_legExt     = px; // re-anchor the ATR trail at the post-spike price
+      g_trailLevel = 0.0;
+      g_state      = ST_RIDE;
       SaveState();
       return;
      }
@@ -1155,6 +1294,7 @@ void ManageLocked()
       ClosePositions(InpMagic, myType);
       ClosePositions(InpMagicLock, -1);
       g_dir   = 0;
+      ResetFlatTrackers();
       g_state = ST_FLAT;
       SaveState();
      }
@@ -1180,6 +1320,7 @@ void ManageEmergency()
      }
    if(TimeCurrent() < g_cooldownEnd) return;
    g_dir   = 0;
+   ResetFlatTrackers();
    g_state = ST_FLAT;
    SaveState();
   }
@@ -1208,7 +1349,8 @@ void RestoreState()
    int sells = CountPos(InpMagic, POSITION_TYPE_SELL);
    if(buys == 0 && sells == 0)
      {
-      if(g_state != ST_HALT_DAY && g_state != ST_EMERGENCY) { g_state = ST_FLAT; g_dir = 0; }
+      if(g_state != ST_HALT_DAY && g_state != ST_EMERGENCY)
+        { g_state = ST_FLAT; g_dir = 0; ResetFlatTrackers(); }
       return;
      }
    if(buys > 0 && sells > 0)
@@ -1248,7 +1390,7 @@ void ShowStatus()
    if(!InpShowComment) return;
    string tfs = EnumToString(g_tf);
    StringReplace(tfs, "PERIOD_", "");
-   string line = "BoomTrendRider v1.30 " + _Symbol + " " + tfs +
+   string line = "BoomTrendRider v1.31 " + _Symbol + " " + tfs +
       "  |  " + StateName(g_state) + " " + (g_dir > 0 ? "LONG" : (g_dir < 0 ? "SHORT" : "-")) +
       "  |  stack " + IntegerToString(CountPos(InpMagic, (g_dir > 0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL)) +
       "/" + IntegerToString(EffNMax()) +
