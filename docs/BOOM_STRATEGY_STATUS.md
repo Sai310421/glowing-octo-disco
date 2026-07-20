@@ -14,6 +14,8 @@ Last updated by the AMOS pipeline; see git history for details.
 | v0 EA | `ea/strategies/boom_drift_grid/BoomDriftGrid_v0.mq5` | code done, not compiled/tested | MT5 compile + Phase C backtest |
 | v1 packet (§8 survival) | `docs/inbox/boom_drift_grid_v1.md` | design done | v0 Phase C results |
 | v1.1 packet (Delta Lock + AI) | `docs/inbox/boom_delta_lock_ai_recovery.md` | design done | v0 Phase C + AI model |
+| Trend Rider packet (video-faithful) | `docs/inbox/boom_trend_rider.md` | design done | — |
+| Trend Rider EA | `ea/strategies/boom_trend_rider/BoomTrendRider_v1.mq5` | hardened v1.31 (guards, persistence, kill-switch; XAUUSD-ready auto-calibration, ATR trail, adaptive timeframe, MQL5 calendar, close-confirmed entries); not compiled/tested | MT5 compile + Phase C backtest per symbol |
 | v1.1 EA skeleton | `ea/strategies/boom_delta_lock_ai_recovery/BoomDeltaLockAIRecovery_v1_1.mq5` | code done, AI safe-stubbed | MT5 compile + model + Phase C |
 | AI I/O contract | `ea/strategies/boom_delta_lock_ai_recovery/ai/FEATURES.md` | fixed | — |
 | AI trainer | `ea/strategies/boom_delta_lock_ai_recovery/ai/train_direction_model.py` | runnable given data | real BOOM_100 data |
@@ -52,3 +54,7 @@ v1.1 get built for real.
 - Delta Lock freezes *directional* risk, not cost; recovery must beat carry cost.
 - The AI recovery only has value if the model shows real out-of-sample edge on
   BOOM_100 — otherwise it is negative-EV. Validate before enabling.
+- Trend Rider is the *video-faithful* mechanism (symmetric SAR, BUY ladder on
+  up-legs too); Drift Grid remains the drift-biased simplification. Backtest
+  both — they fail in different regimes (Rider dies in chop, Grid dies on
+  spikes). Range regime ⇒ **widen** the pitch, never narrow (stop-order grid).
