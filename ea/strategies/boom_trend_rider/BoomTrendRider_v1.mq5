@@ -49,8 +49,21 @@
 //|  Strategy Tester or offline - the EA logs one warning and        |
 //|  degrades to manual windows there.                               |
 //+------------------------------------------------------------------+
+//|  v1.40: causal ER regime gate (docs/inbox/trend_rider_          |
+//|  50pct_verification.md - "Regime-gate walk-forward" section).    |
+//|  A long-window Kaufman ER (default ~250 M5 bars / 20.8h) is       |
+//|  compared against hysteresis thresholds derived ONLY from the     |
+//|  trailing InpGateTrainDays of ER history (no lookahead),          |
+//|  recalibrated every InpGateRecalcDays. Below the OFF threshold,   |
+//|  the EA flattens and sits out; above the ON threshold, it         |
+//|  resumes normal riding. Walk-forward verified on one instrument/  |
+//|  period (XAUUSD M5, 2026 Mar-Jul: weak-regime months improved     |
+//|  from -$134/mo to +$38/mo net); default OFF until validated on    |
+//|  more data. This is a SEPARATE module from the short-window ER    |
+//|  used for pitch widening (decision 1) - the two do not interact.  |
+//+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.31"
+#property version   "1.40"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -64,7 +77,8 @@ enum ENUM_RIDER_STATE
    ST_NEWS_HALT,  // inside a news window (FLATTEN/LOCK/STRADDLE)
    ST_HALT_DAY,   // daily-loss halt: flat until the next server day
    ST_EMERGENCY,  // anomaly: flatten, cooldown, then restart flat
-   ST_KILLED      // equity DD kill-switch: manual re-init required
+   ST_KILLED,     // equity DD kill-switch: manual re-init required
+   ST_GATE_OFF    // regime gate: long-window ER below threshold, sitting out
   };
 
 enum ENUM_NEWS_MODE
@@ -143,6 +157,14 @@ input string InpNewsWindows   = "";    // extra manual windows "HH:MM-HH:MM;..."
 input int    InpNewsPreMin    = 5;     // manual windows: act N minutes before
 input double InpNewsStraddleK = 2.0;   // k_news: straddle distance = k * Delta_t
 
+input group "Regime gate (v1.40, WF-verified one instrument/period only)"
+input bool   InpUseRegimeGate  = false; // sit out low-efficiency regimes (opt-in; see docs/inbox/trend_rider_50pct_verification.md)
+input int    InpGateWindowMin  = 1250;  // long-window ER lookback, minutes (default: WF winner ~250 M5 bars = 20.8h)
+input int    InpGateTrainDays  = 60;    // trailing days of ER history used to set thresholds (matches the WF study)
+input double InpGateQOn        = 0.50;  // ER quantile (of the trailing sample) that switches trading ON
+input double InpGateQGap       = 0.20;  // hysteresis gap: OFF threshold = (q_on - gap) quantile
+input int    InpGateRecalcDays = 30;    // recalibrate thresholds every N days (matches the WF fold cadence)
+
 input group "Economic calendar (MQL5 built-in; v1.30)"
 input bool   InpUseCalendar   = true;  // auto news windows from the MT5 calendar
 input ENUM_CALENDAR_EVENT_IMPORTANCE InpCalMinImportance = CALENDAR_IMPORTANCE_HIGH; // minimum importance
@@ -197,6 +219,12 @@ datetime         g_entryBar    = 0;      // closed-bar gate for entry decisions
 double           g_flatHi      = 0.0;    // highest close while FLAT (close-based seed)
 double           g_flatLo      = 0.0;    // lowest close while FLAT
 double           g_trailLevel  = 0.0;    // tighten-only trail level (close-based flip)
+bool             g_gateOn      = true;   // regime gate state (permissive until calibrated)
+double           g_gateErNow   = 1.0;    // current long-window ER reading
+double           g_gateThrOn   = 0.0;    // ON threshold in ER units (0 = not calibrated yet)
+double           g_gateThrOff  = 0.0;    // OFF threshold in ER units
+datetime         g_gateErBar   = 0;      // last bar the long-window ER was refreshed on
+datetime         g_gateNextRecalc = 0;   // next threshold recalibration time
 
 //+------------------------------------------------------------------+
 //| State persistence (survives terminal restarts)                   |
@@ -245,6 +273,8 @@ int OnInit()
       InpTfRangeSpreadMult < 1.0 || InpTfReviewMin < 1 ||
       InpCalPreMin < 0 || InpCalPostMin < 0 || InpCalRefreshMin < 1 ||
       InpRiskPctPerFlip <= 0.0 || InpMaxMarginUsePct <= 0.0 || InpMaxMarginUsePct > 100.0 ||
+      InpGateWindowMin < 1 || InpGateTrainDays < 1 || InpGateQOn <= 0.0 || InpGateQOn > 1.0 ||
+      InpGateQGap < 0.0 || InpGateQOn - InpGateQGap < 0.0 || InpGateRecalcDays < 1 ||
       InpMagic == InpMagicLock)
      {
       Print("BTR: invalid inputs - refusing to start.");
@@ -608,6 +638,136 @@ double TrailStepNow()
    if(!InpAutoCalibrate) return(InpTrailStep);
    double s = MathMax(0.10 * g_atrCache, 0.50 * g_spreadEMA);
    return(s > 0.0 ? s : InpTrailStep);
+  }
+
+//+------------------------------------------------------------------+
+//| Regime gate (v1.40) - long-window ER on/off switch, causal        |
+//| thresholds only. SEPARATE from EfficiencyRatio() above, which is  |
+//| the short window (InpERPeriod) used for pitch widening only.      |
+//+------------------------------------------------------------------+
+int GateWindowBars()
+  {
+   int secPerBar = PeriodSeconds(g_tf);
+   if(secPerBar <= 0) return(InpGateWindowMin);
+   int bars = (int)MathRound(InpGateWindowMin * 60.0 / secPerBar);
+   return(MathMax(bars, 10));
+  }
+
+double LongEfficiencyRatio(const int n)
+  {
+   if(n < 2) return(1.0);
+   double num = MathAbs(iClose(_Symbol, g_tf, 1) - iClose(_Symbol, g_tf, n));
+   double den = 0.0;
+   for(int i = 1; i < n; i++)
+      den += MathAbs(iClose(_Symbol, g_tf, i) - iClose(_Symbol, g_tf, i + 1));
+   return(den > 0.0 ? num / den : 1.0);
+  }
+
+// linear-interpolated percentile (numpy.quantile default), ascending sort
+double QuantileOf(double &arr[], const double q)
+  {
+   int n = ArraySize(arr);
+   if(n == 0) return(0.0);
+   if(n == 1) return(arr[0]);
+   double a[]; ArrayResize(a, n); ArrayCopy(a, arr);
+   ArraySort(a);
+   double pos = q * (n - 1);
+   int lo = (int)MathFloor(pos), hi = (int)MathCeil(pos);
+   if(lo == hi) return(a[lo]);
+   return(a[lo] + (a[hi] - a[lo]) * (pos - lo));
+  }
+
+// recompute thr_on/thr_off from the TRAILING InpGateTrainDays of history
+// only (causal: nothing at or after "now" informs the thresholds)
+void RecalibrateGateThresholds()
+  {
+   int windowBars = GateWindowBars();
+   int secPerBar  = PeriodSeconds(g_tf);
+   if(secPerBar <= 0) return;
+   int trainBars = (int)MathRound(InpGateTrainDays * 24.0 * 3600.0 / secPerBar);
+   int have  = Bars(_Symbol, g_tf);
+   int total = MathMin(trainBars + windowBars + 5, have - 1);
+   if(total < windowBars + 20) { g_gateThrOn = 0.0; return; } // not enough history yet
+
+   // c[k] = close at shift (total-k): k=0 is the oldest bar in the window,
+   // k=total-1 is shift=1 (the most recently closed bar) - ascending time,
+   // built via iClose(shift) like the rest of this file (no CopyClose
+   // series-direction ambiguity to worry about)
+   double c[]; ArrayResize(c, total);
+   for(int k = 0; k < total; k++)
+      c[k] = iClose(_Symbol, g_tf, total - k);
+
+   double csum[]; ArrayResize(csum, total);
+   csum[0] = 0.0;
+   for(int i = 1; i < total; i++)
+      csum[i] = csum[i - 1] + MathAbs(c[i] - c[i - 1]);
+
+   double sample[]; ArrayResize(sample, total - windowBars);
+   for(int i = windowBars; i < total; i++)
+     {
+      double num = MathAbs(c[i] - c[i - windowBars]);
+      double den = csum[i] - csum[i - windowBars];
+      sample[i - windowBars] = (den > 0.0) ? num / den : 1.0;
+     }
+   if(ArraySize(sample) < 20) { g_gateThrOn = 0.0; return; }
+
+   g_gateThrOn  = QuantileOf(sample, InpGateQOn);
+   g_gateThrOff = QuantileOf(sample, MathMax(InpGateQOn - InpGateQGap, 0.0));
+   Print("BTR: regime gate recalibrated - window=", windowBars, " bars (",
+         DoubleToString(windowBars * secPerBar / 3600.0, 1), "h)  train=", ArraySize(sample),
+         " samples  thr_on=", DoubleToString(g_gateThrOn, 4),
+         "  thr_off=", DoubleToString(g_gateThrOff, 4));
+  }
+
+// updates g_gateOn every tick (hysteresis); recalibrates thresholds and the
+// long-window ER reading only as often as needed (cheap on every other tick)
+void UpdateRegimeGate()
+  {
+   if(!InpUseRegimeGate) { g_gateOn = true; return; }
+
+   datetime bar = iTime(_Symbol, g_tf, 0);
+   if(bar != g_gateErBar)
+     {
+      g_gateErBar = bar;
+      g_gateErNow = LongEfficiencyRatio(GateWindowBars());
+     }
+   if(TimeCurrent() >= g_gateNextRecalc)
+     {
+      RecalibrateGateThresholds();
+      g_gateNextRecalc = TimeCurrent() + (datetime)(InpGateRecalcDays * 24 * 3600);
+     }
+
+   if(g_gateThrOn <= 0.0) { g_gateOn = true; return; } // not calibrated yet: stay permissive
+   if(g_gateErNow >= g_gateThrOn)       g_gateOn = true;
+   else if(g_gateErNow < g_gateThrOff)  g_gateOn = false;
+   // else: inside the hysteresis band - keep the previous g_gateOn
+  }
+
+// returns true when the regime gate owns this tick (flattened and sitting out)
+bool HandleRegimeGate()
+  {
+   UpdateRegimeGate();
+   if(g_gateOn)
+     {
+      if(g_state == ST_GATE_OFF) // gate just turned back on: resume from flat
+        {
+         g_dir = 0;
+         ResetFlatTrackers();
+         g_state = ST_FLAT;
+         SaveState();
+        }
+      return(false);
+     }
+   if(g_state != ST_GATE_OFF)
+     {
+      Print("BTR: regime gate OFF (ER=", DoubleToString(g_gateErNow, 4), " < thr_off=",
+            DoubleToString(g_gateThrOff, 4), ") - flattening and sitting out.");
+      g_state = ST_GATE_OFF;
+      SaveState();
+     }
+   if(CountPos(InpMagic, -1) + CountPos(InpMagicLock, -1) > 0 || PendingCount(-1) > 0)
+      if(OpsAllowed()) CloseEverything();
+   return(true);
   }
 
 //+------------------------------------------------------------------+
@@ -1381,6 +1541,7 @@ string StateName(const ENUM_RIDER_STATE s)
       case ST_HALT_DAY:  return("HALT-DAY");
       case ST_EMERGENCY: return("EMERGENCY");
       case ST_KILLED:    return("KILLED");
+      case ST_GATE_OFF:  return("GATE-OFF");
      }
    return("?");
   }
@@ -1390,7 +1551,7 @@ void ShowStatus()
    if(!InpShowComment) return;
    string tfs = EnumToString(g_tf);
    StringReplace(tfs, "PERIOD_", "");
-   string line = "BoomTrendRider v1.31 " + _Symbol + " " + tfs +
+   string line = "BoomTrendRider v1.40 " + _Symbol + " " + tfs +
       "  |  " + StateName(g_state) + " " + (g_dir > 0 ? "LONG" : (g_dir < 0 ? "SHORT" : "-")) +
       "  |  stack " + IntegerToString(CountPos(InpMagic, (g_dir > 0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL)) +
       "/" + IntegerToString(EffNMax()) +
@@ -1404,6 +1565,9 @@ void ShowStatus()
       " (peak " + DoubleToString(g_eqPeak, 2) + ")";
    int nm = NextCalEventMin();
    if(nm >= 0 && nm <= 180) line += "  |  news in " + IntegerToString(nm) + "m";
+   if(InpUseRegimeGate)
+      line += "  |  gate " + (g_gateOn ? "ON" : "OFF") + " ER=" + DoubleToString(g_gateErNow, 3) +
+              " (on>=" + DoubleToString(g_gateThrOn, 3) + " off<" + DoubleToString(g_gateThrOff, 3) + ")";
    Comment(line);
   }
 
@@ -1425,6 +1589,7 @@ void OnTick()
 
    if(HandleAccountRisk()) { ShowStatus(); return; } // KILLED / HALT-DAY own the tick
    if(HandleNews())        { ShowStatus(); return; } // news module owns the tick
+   if(HandleRegimeGate())  { ShowStatus(); return; } // regime gate owns the tick (v1.40, opt-in)
 
    switch(g_state)
      {

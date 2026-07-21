@@ -24,7 +24,7 @@ Covers BOOM_100 strategies and some XAUUSD research that shares the same tooling
 | Component | File | Status | Gated on |
 |---|---|---|---|
 | Trend Rider packet | `docs/inbox/boom_trend_rider.md` | design done | — |
-| Trend Rider EA | `ea/strategies/boom_trend_rider/BoomTrendRider_v1.mq5` | hardened v1.31 (guards, kill-switch, XAUUSD-ready auto-calibration, ATR trail, adaptive timeframe, MQL5 calendar, close-confirmed entries); not compiled/tested | MT5 compile + Phase C backtest per symbol |
+| Trend Rider EA | `ea/strategies/boom_trend_rider/BoomTrendRider_v1.mq5` | hardened v1.40 (guards, kill-switch, XAUUSD-ready auto-calibration, ATR trail, adaptive timeframe, MQL5 calendar, close-confirmed entries, opt-in ER regime gate); not compiled/tested | MT5 compile + Phase C backtest per symbol |
 
 Trend Rider is the *symmetric, always-in, stop-and-reverse* mechanism the source
 video actually shows; Drift Grid is the drift-biased simplification. They fail in
@@ -44,7 +44,7 @@ different regimes — **Rider dies in chop, Grid dies on spikes** — so backtes
 | CB Survivor economics on real data | `scripts/cb_survivor_bt.py` | **Negative** — counter-trend grid loses ~$1,700/mo and blows $10k on the trending half-year under every rescue architecture (freeze+pool, ZR, macro gating). |
 | Trend-direction-only architectures | `scripts/trend_direction_bt.py` · `reports/trend_direction_bt.json` | CORRECTED after review: one-sided grid's "+$226/mo" was H1 lookahead — it actually blows the account. Trend Rider SAR +$57/mo (no CB) / +$125/mo with CB at 11.4% maxDD; edge still t≈0.2 (statistically zero). |
 | HyperScalp v1.21 mechanical core | `scripts/hyperscalp_bt.py` · `reports/hyperscalp_bt.json` | **Negative both ways**: as-coded (SL guard rejects 11/12 limits — defect) −$17/mo; intended full cluster −$139/mo at 12.9% maxDD. Counter-move cluster loses on this trending period. |
-| Regime-gate walk-forward | `scripts/trend_rider_regime_wf.py` · `reports/trend_rider_regime_wf.json` | **Causal ER gate works** (continuous-state, post-review): weak months −$134/mo → +$38/mo net (+$77 w/CB) at N=250(20.8h) q=0.5; 9/12 fixed configs beat baseline; per-fold re-optimization is where overfitting lives; N=500(1.7d) harmful at every threshold. |
+| Regime-gate walk-forward | `scripts/trend_rider_regime_wf.py` · `reports/trend_rider_regime_wf.json` | **Causal ER gate works** (continuous-state, post-review): weak months −$134/mo → +$38/mo net (+$77 w/CB) at N=250(20.8h) q=0.5; 9/12 fixed configs beat baseline; per-fold re-optimization is where overfitting lives; N=500(1.7d) harmful at every threshold. **Implemented in the EA** (v1.40, `InpUseRegimeGate`, default OFF) with the same causal recalibration design; not yet re-backtested as EA code. |
 | Mathematical framework | `docs/inbox/mathematical_framework.md` | Kelly ceiling ~1.6%/mo with CB after cost-model correction (§7); only real structure in-sample is VR(4h)=0.83 reversion. Sign is decided by direction-vs-trend, not exits/rescues. |
 
 ## 4. Shared tooling
