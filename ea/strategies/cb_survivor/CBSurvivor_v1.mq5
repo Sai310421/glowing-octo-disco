@@ -10,8 +10,11 @@
 //|                   positions (loss > StuckThreshold)              |
 //|    (2) TailCut  - realized-profit POOL buys out the worst stuck  |
 //|                   position when pool >= its loss                 |
-//|    (3) ReverseGrid - counter-side nanpin chain that refills the  |
-//|                   pool once the main side exceeds TriggerCount   |
+//|    (3) ReverseGrid/delta hedge (v1.10, author-corrected): a      |
+//|                   hedge leg mirrors the net stuck volume so the  |
+//|                   stuck minus is FROZEN (両バリ固定); pool        |
+//|                   profits then amortize it via TailCut, so the   |
+//|                   minus steps down instead of trend-growing      |
 //|    (4) SlotFree - at MaxPositions, force-close the newest pos    |
 //|                   (TriggerA distance / gap, TriggerB rotation    |
 //|                   stagnation) to keep the grid breathing         |
@@ -29,7 +32,7 @@
 //|  "pips" here = 10 * _Point (XAUUSD 2-digit: 1 pip = $0.10).      |
 //+------------------------------------------------------------------+
 #property copyright "MSS Group / AMOS"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -61,11 +64,9 @@ input int    InpOffset2Cooldown  = 5;     // seconds between firings
 input double InpRotationWindowH  = 1.0;   // TriggerB observation window (hours)
 input double InpRotationThreshold = 70.0; // % of previous window's closes => stagnation
 
-input group "ReverseGrid (section 5)"
-input bool   InpEnableReverseGrid = true;
-input int    InpRevTriggerCount  = 25;    // main-side count to activate (rec. 10)
-input double InpRevNanpinMult    = 1.5;   // reverse nanpin interval = NanpinPips * this
-input double InpRevTPPerBaseLot  = 1.0;   // ASSUMPTION: reverse per-pos TP, USD per BaseLot
+input group "ReverseGrid / delta hedge (section 5; author-corrected v1.10)"
+input bool   InpEnableReverseGrid = true; // hedge leg freezes the stuck minus (両バリ固定)
+input int    InpRevTriggerCount  = 25;    // main total count to activate (rec. 10)
 
 input group "Weekend (section 9)"
 input ENUM_WEEKEND_ACTION InpWeekendAction = ACTION_NONE;
@@ -123,7 +124,7 @@ int OnInit()
   {
    if(InpBaseLot <= 0 || InpNanpinPips <= 0 || InpMaxPositions < 1 ||
       InpNormalProfit <= 0 || InpStuckThreshold <= 0 || InpNanpinLotFrom < 1 ||
-      InpNanpinLotMult < 1.0 || InpRevNanpinMult <= 0 || InpRevTriggerCount < 1 ||
+      InpNanpinLotMult < 1.0 || InpRevTriggerCount < 1 ||
       InpMagic == InpMagicReverse)
      {
       Print("CBS: invalid inputs.");
@@ -330,59 +331,80 @@ void ManageTailCut()
   }
 
 //+------------------------------------------------------------------+
-//| (3) ReverseGrid - counter-side chain that refills the pool       |
+//| (3) ReverseGrid v1.10 - 両バリ固定 delta hedge (author-corrected) |
+//| The hedge leg mirrors the NET stuck volume of the main grid so   |
+//| the stuck floating loss is FROZEN (net delta ~ 0). Profits from  |
+//| baskets and hedge reductions accumulate in the pool; TailCut     |
+//| then amortizes stuck positions one by one - the frozen minus     |
+//| steps DOWN over time instead of growing with the trend.          |
 //+------------------------------------------------------------------+
+double StuckVolume(const int type)
+  {
+   double v = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(!Mine((long)PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL), InpMagic)) continue;
+      if((int)PositionGetInteger(POSITION_TYPE) != type) continue;
+      double p = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(-p > InpStuckThreshold) v += PositionGetDouble(POSITION_VOLUME);
+     }
+   return(v);
+  }
+
 void ManageReverseGrid()
   {
    if(!InpEnableReverseGrid) return;
-   int nb = CountSide(InpMagic, POSITION_TYPE_BUY);
-   int ns = CountSide(InpMagic, POSITION_TYPE_SELL);
-   int mainTotal = nb + ns;
-   int revType = (nb >= ns) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY; // opposite of dominant
+   int mainTotal = CountSide(InpMagic, POSITION_TYPE_BUY) + CountSide(InpMagic, POSITION_TYPE_SELL);
 
-   trade.SetExpertMagicNumber(InpMagicReverse);
+   // net stuck imbalance decides the hedge side and size (両バリ固定)
+   double net = StuckVolume(POSITION_TYPE_SELL) - StuckVolume(POSITION_TYPE_BUY);
+   int    wantType = (net > 0.0) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   double wantVol  = (mainTotal > InpRevTriggerCount) ? MathAbs(net) : 0.0;
 
-   if(mainTotal > InpRevTriggerCount)
-     {
-      int nr = CountSide(InpMagicReverse, revType);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double gap = InpNanpinPips * InpRevNanpinMult * PIP;
-      double last = LastEntryPrice(InpMagicReverse, revType);
-      bool addOK = (nr == 0) ||
-                   (revType == POSITION_TYPE_BUY  && last > 0 && last - ask >= gap) ||
-                   (revType == POSITION_TYPE_SELL && last > 0 && bid - last >= gap);
-      if(nr < InpMaxPositions && addOK)
-        {
-         if(revType == POSITION_TYPE_BUY) trade.Buy(InpBaseLot, _Symbol, 0.0, 0.0, 0.0, "CBS revgrid B");
-         else                             trade.Sell(InpBaseLot, _Symbol, 0.0, 0.0, 0.0, "CBS revgrid S");
-        }
-     }
-
-   // per-position TP -> pool refill ("プール補充": each reverse close feeds the pool)
-   double tpUSD = InpRevTPPerBaseLot;   // ASSUMPTION: USD per BaseLot position
+   double curBuy  = 0.0, curSell = 0.0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
       if(t == 0) continue;
       if(!Mine((long)PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL), InpMagicReverse)) continue;
-      if(PosProfit(t) >= tpUSD * (PositionGetDouble(POSITION_VOLUME) / InpBaseLot))
-         ClosePos(t, "revTP");
+      if((int)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) curBuy += PositionGetDouble(POSITION_VOLUME);
+      else curSell += PositionGetDouble(POSITION_VOLUME);
      }
 
-   // dissolve (flowchart "逆グリッド解消"): main back under trigger =>
-   // ASSUMPTION: close the reverse basket once it is not losing
-   if(mainTotal <= InpRevTriggerCount && CountSide(InpMagicReverse, -1) > 0)
+   double step = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 0.01);
+   trade.SetExpertMagicNumber(InpMagicReverse);
+
+   // 1) close hedge on the wrong side entirely (realizes into the pool)
+   if(wantVol <= 0.0 || wantType == POSITION_TYPE_BUY)
+      if(curSell > 0.0) CloseSide(InpMagicReverse, POSITION_TYPE_SELL, "hedge flip");
+   if(wantVol <= 0.0 || wantType == POSITION_TYPE_SELL)
+      if(curBuy > 0.0) CloseSide(InpMagicReverse, POSITION_TYPE_BUY, "hedge flip");
+
+   // 2) shrink excess hedge (stuck side was amortized) - newest first
+   double cur = (wantType == POSITION_TYPE_BUY) ? curBuy : curSell;
+   while(cur > wantVol + step * 0.5)
      {
-      double pnl = 0.0;
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      ulong t1, t2;
+      NewestTwo(InpMagicReverse, wantType, t1, t2);
+      if(t1 == 0) break;
+      PositionSelectByTicket(t1);
+      cur -= PositionGetDouble(POSITION_VOLUME);
+      if(!ClosePos(t1, "hedge shrink")) break;
+     }
+
+   // 3) grow hedge toward the stuck volume (freeze the minus)
+   if(wantVol > cur + step * 0.5)
+     {
+      double add = MathFloor((wantVol - cur) / step + 1e-9) * step;
+      if(add >= step)
         {
-         ulong t = PositionGetTicket(i);
-         if(t == 0) continue;
-         if(!Mine((long)PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL), InpMagicReverse)) continue;
-         pnl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         bool ok = (wantType == POSITION_TYPE_BUY)
+                   ? trade.Buy(add, _Symbol, 0.0, 0.0, 0.0, "CBS hedge lock")
+                   : trade.Sell(add, _Symbol, 0.0, 0.0, 0.0, "CBS hedge lock");
+         if(!ok) Print("CBS: hedge add failed ", trade.ResultRetcodeDescription());
         }
-      if(pnl >= 0.0) CloseSide(InpMagicReverse, -1, "revdissolve");
      }
 
    trade.SetExpertMagicNumber(InpMagic);

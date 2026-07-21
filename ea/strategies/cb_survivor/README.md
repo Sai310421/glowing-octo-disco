@@ -27,7 +27,7 @@ recommends for XAUUSD M1: `NormalProfit=1.0`, `NanpinLotMultiplier=2.0`,
 | §2 grid basics | `ManageMainGrid` — hedged seed, nanpin every `NanpinPips` against each side, cap `MaxPositions`/side |
 | §3 basket TP | `ManageBasket` — combined (or per-side when BASKET OFF) floating PnL excluding stuck (loss > `StuckThreshold`) ≥ `NormalProfit` ⇒ close basket |
 | §4 TailCut | `ManageTailCut` — pool ≥ worst stuck loss ⇒ buy it out; all realized PnL flows through the pool; negative pool resets to 0 after 5s |
-| §5 ReverseGrid | `ManageReverseGrid` — main total > `TriggerCount` ⇒ counter-side chain at `NanpinPips×1.5`, per-position TP refills the pool; separate magic |
+| §5 ReverseGrid | `ManageReverseGrid` v1.10 (author-corrected) — hedge leg mirrors the NET stuck volume ⇒ stuck minus frozen (両バリ固定); shrinks as TailCut amortizes, realizing into the pool; separate magic |
 | §6 SlotFree | `ManageSlotFree` — at full slots: TriggerA (newest-entry distance ≥ `Offset2_ExtraPips`) OR TriggerB (close-rotation < `Rotation_Threshold`% of previous window) ⇒ close newest (+1 if gap ≥ `Offset2_GapPips`), cooldown |
 | §7 lot ladder | `NanpinLot` — ×`NanpinLotMultiplier` from level `NanpinLotFrom` |
 | §8 BulkClear | equity ≥ base + `BulkClearProfit` ⇒ flatten, re-anchor base, optional auto-stop |
@@ -36,11 +36,11 @@ recommends for XAUUSD M1: `NormalProfit=1.0`, `NanpinLotMultiplier=2.0`,
 
 ## Flagged assumptions (not specified by the manual)
 1. **Seeding**: one starter position per side is kept open (hedged grid start).
-2. **ReverseGrid TP unit**: `InpRevTPPerBaseLot` USD per BaseLot per position
-   (manual only says "利確分をプールに補充").
-3. **ReverseGrid dissolve**: when the main count returns under the trigger,
-   the reverse basket closes once its combined PnL ≥ 0 (flowchart's
-   "逆グリッド解消" gives no rule).
+2. **ReverseGrid semantics (v1.10)**: per the author's correction, the
+   reverse leg is a delta hedge equal to the net stuck volume — it freezes
+   the stuck minus; pool profits then amortize it (利益はマイナスを減らす).
+   The v1.00 reading (independent counter-chain with per-position TP) is
+   retired.
 4. **TriggerA/B combination**: OR (manual lists both without stating logic).
 5. **Pips**: 1 pip = 10 × `_Point` ($0.10 on 2-digit XAUUSD). Verify against
    your broker's digits before live use.
@@ -78,3 +78,24 @@ A larger account avoids the blowup but not the negative net economics.
 run this EA unattended on gold with the recommended set.** If used at all, it
 needs a regime filter (range-only operation) and per-month kill criteria —
 and that modified system would require its own Phase C pass.
+
+## v2 result — author-corrected dynamics (両バリ固定 + プール償却)
+
+After the author's correction the simulation freezes the stuck minus with an
+equal-volume hedge and lets the pool amortize it (scripts/cb_survivor_bt.py,
+`simulate_lock`). Same data, same recommended set:
+
+| spread | max floating DD | net trading (no CB) | volume | net+CB@15 | break-even CB |
+|---|---|---|---|---|---|
+| $0.20 | **$586** (was $10,852) | −$1,698/mo | 62.6 lot/mo | −$759/mo | $27.1/lot |
+| $0.28 | **$577** | −$1,698/mo | 46.7 lot/mo | −$997/mo | $36.3/lot |
+| $0.35 | **$588** | −$1,700/mo | 38.0 lot/mo | −$1,130/mo | $44.7/lot |
+
+The correction works exactly as described for RISK: the minus is frozen and
+steps down through 2,600-4,800 TailCuts. What it cannot remove is the
+pre-lock cost: a position only becomes "stuck" (and hedgeable) after losing
+`StuckThreshold` ($3.3), and a trend manufactures a fresh stuck position
+every ~25-33 pips on the re-seeding side — a structural bleed of ~$1,700/mo
+on this bull half-year, spread-independent. CB at realistic rates covers
+roughly half of it. In ranging months the same engine should be net positive;
+regime gating remains the decisive missing piece.

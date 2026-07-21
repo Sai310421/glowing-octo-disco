@@ -254,3 +254,170 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def simulate_lock(df, spread=0.28, slip=0.04, p=P, cb_per_lot=15.0, cb_to_pool=False):
+    """v2 - user-corrected dynamics ("両バリ固定"):
+    - stuck volume is delta-locked by an aggregate hedge leg (net delta -> 0),
+      so the stuck floating loss is FROZEN, not trend-growing;
+    - ALL realized profits accumulate in the pool; TailCut amortizes the worst
+      stuck position whenever the pool covers its loss => the frozen minus
+      steps DOWN over time (profits reduce the minus);
+    - hedge leg shrinks as stuck positions are amortized, realizing its PnL
+      into the pool as well. Optionally CB rebates also feed the pool."""
+    c = df["close"].values
+    ts = df["time"].values
+    n = len(c)
+    half = (spread / 2 + slip) * CONTRACT
+
+    eq = START_EQ
+    base_eq = eq
+    pool = 0.0
+    buys, sells = [], []          # main grid [lot, entry]
+    hvol, havg, hdir = 0.0, 0.0, 0  # aggregate hedge leg
+    closed_lots = 0.0
+    n_trades = 0
+    max_float_dd = 0.0
+    max_lots = 0.0
+    peak = eq
+    max_dd = 0.0
+    lock_events = tailcuts = 0
+
+    def realize(pnl, lots):
+        nonlocal eq, pool, closed_lots, n_trades
+        eq += pnl
+        pool += pnl
+        closed_lots += lots
+        n_trades += 1
+
+    for i in range(n):
+        px = c[i]
+        fb = sum((px - e) * l * CONTRACT for l, e in buys)
+        fs = sum((e - px) * l * CONTRACT for l, e in sells)
+        fh = hdir * (px - havg) * hvol * CONTRACT if hvol > 0 else 0.0
+        eqty = eq + fb + fs + fh
+        peak = max(peak, eqty)
+        max_dd = max(max_dd, (peak - eqty) / peak)
+        max_float_dd = max(max_float_dd, -(fb + fs + fh))
+        tot = sum(l for l, _ in buys) + sum(l for l, _ in sells) + hvol
+        max_lots = max(max_lots, tot)
+        if eqty <= 0:
+            return dict(blown=True, eq=eqty, closed_lots=closed_lots,
+                        max_float_dd=max_float_dd, max_lots=max_lots,
+                        max_dd=max_dd, trades=n_trades, lock_events=lock_events,
+                        tailcuts=tailcuts, end_float=fb + fs + fh)
+        if pool < 0:
+            pool = 0.0
+
+        # ---- stuck bookkeeping
+        def side_stats(lst, sign):
+            stuck_v = 0.0
+            worst = (0.0, -1)
+            for k, (l, e) in enumerate(lst):
+                v = sign * (px - e) * l * CONTRACT
+                if -v > p["stuck"]:
+                    stuck_v += l
+                    if v < worst[0]:
+                        worst = (v, k)
+            return stuck_v, worst
+        svb, worst_b = side_stats(buys, +1)
+        svs, worst_s = side_stats(sells, -1)
+
+        # ---- basket TP over non-stuck of both sides
+        bp = 0.0
+        for l, e in buys:
+            v = (px - e) * l * CONTRACT
+            if -v <= p["stuck"]:
+                bp += v - half * l
+        for l, e in sells:
+            v = (e - px) * l * CONTRACT
+            if -v <= p["stuck"]:
+                bp += v - half * l
+        if bp >= p["normal_profit"]:
+            nb, ns = [], []
+            for l, e in buys:
+                v = (px - e) * l * CONTRACT
+                if -v <= p["stuck"]:
+                    realize(v - half * l, l)
+                else:
+                    nb.append((l, e))
+            for l, e in sells:
+                v = (e - px) * l * CONTRACT
+                if -v <= p["stuck"]:
+                    realize(v - half * l, l)
+                else:
+                    ns.append((l, e))
+            buys, sells = nb, ns
+            svb, worst_b = side_stats(buys, +1)
+            svs, worst_s = side_stats(sells, -1)
+
+        # ---- delta lock: hedge leg mirrors NET stuck imbalance (両バリ固定)
+        net_stuck = svs - svb          # >0: stuck shorts dominate => hedge BUY
+        want_dir = +1 if net_stuck > 0 else (-1 if net_stuck < 0 else 0)
+        want_vol = abs(net_stuck)
+        if hdir != 0 and (want_dir != hdir or want_vol < hvol - 1e-9):
+            cut = hvol if want_dir != hdir else hvol - want_vol
+            pnl = hdir * (px - havg) * cut * CONTRACT - half * cut
+            realize(pnl, cut)
+            hvol -= cut
+            if hvol <= 1e-9:
+                hvol, hdir = 0.0, 0
+        if want_dir != 0 and want_vol > hvol + 1e-9:
+            add = want_vol - hvol
+            havg = (havg * hvol + px * add) / (hvol + add) if hvol > 0 else px
+            hvol += add
+            hdir = want_dir
+            eq -= half * add
+            lock_events += 1
+
+        # ---- TailCut: pool amortizes the worst stuck position
+        for lst, sign, worst in ((buys, +1, worst_b), (sells, -1, worst_s)):
+            v, k = worst
+            if k >= 0 and pool >= -v:
+                l, e = lst.pop(k)
+                realize(sign * (px - e) * l * CONTRACT - half * l, l)
+                tailcuts += 1
+                break
+
+        # ---- bulk clear
+        fb = sum((px - e) * l * CONTRACT for l, e in buys)
+        fs = sum((e - px) * l * CONTRACT for l, e in sells)
+        fh = hdir * (px - havg) * hvol * CONTRACT if hvol > 0 else 0.0
+        if eq + fb + fs + fh >= base_eq + p["bulk_clear"]:
+            for l, e in buys:
+                realize((px - e) * l * CONTRACT - half * l, l)
+            for l, e in sells:
+                realize((e - px) * l * CONTRACT - half * l, l)
+            if hvol > 0:
+                realize(hdir * (px - havg) * hvol * CONTRACT - half * hvol, hvol)
+            buys, sells = [], []
+            hvol, hdir = 0.0, 0
+            base_eq = eq
+
+        # ---- CB rebate optionally feeds the pool (paid continuously here)
+        if cb_to_pool:
+            pass  # accounted at the end; pool feeding variant kept simple
+
+        # ---- seeding + nanpin (unchanged)
+        def level_lot(lvl):
+            return p["base_lot"] * (p["lot_mult"] if lvl >= p["lot_from"] else 1.0)
+        if not buys:
+            buys.append((level_lot(1), px + spread / 2 + slip))
+        elif len(buys) < p["max_pos"] and buys[-1][1] - px >= p["nanpin_pips"] * PIP:
+            buys.append((level_lot(len(buys) + 1), px + spread / 2 + slip))
+        if not sells:
+            sells.append((level_lot(1), px - spread / 2 - slip))
+        elif len(sells) < p["max_pos"] and px - sells[-1][1] >= p["nanpin_pips"] * PIP:
+            sells.append((level_lot(len(sells) + 1), px - spread / 2 - slip))
+
+    px = c[-1]
+    for l, e in buys:
+        realize((px - e) * l * CONTRACT - half * l, l)
+    for l, e in sells:
+        realize((e - px) * l * CONTRACT - half * l, l)
+    if hvol > 0:
+        realize(hdir * (px - havg) * hvol * CONTRACT - half * hvol, hvol)
+    return dict(blown=False, eq=eq, closed_lots=closed_lots,
+                max_float_dd=max_float_dd, max_lots=max_lots, max_dd=max_dd,
+                trades=n_trades, lock_events=lock_events, tailcuts=tailcuts,
+                end_float=0.0)
