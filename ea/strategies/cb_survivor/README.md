@@ -56,3 +56,25 @@ keep net trading loss under ~$0.15 per 0.01-lot round trip to break even
 before rebates. Whether that holds is a Phase C question — backtest the grid
 WITHOUT the CB credit first, then add CB × realized volume; and confirm the
 rebate program's terms actually pay on this kind of volume.
+
+## Phase C result on real data (2026-01-04..07-03, ork.ad 1m, scripts/cb_survivor_bt.py)
+
+Recommended XAUUSD set, $10k start, decisions on 1m closes, spread sweep:
+
+| spread | net trading PnL (no CB) | volume | CB @$15/lot | net+CB | break-even CB | outcome |
+|---|---|---|---|---|---|---|
+| $0.20 | −$1,824/mo | 77.5 lot/mo | +$1,163/mo | **−$661/mo** | $23.5/lot | account blown |
+| $0.28 | −$1,842/mo | 26.6 lot/mo | +$399/mo | **−$1,442/mo** | $69.2/lot | account blown |
+| $0.35 | −$1,710/mo | 18.5 lot/mo | +$277/mo | **−$1,433/mo** | $92.6/lot | account blown |
+
+This half-year was a strong gold bull (+$1,655 range): the 25-pip/25-level
+grid's covered range ($62.5) was overrun for weeks at a time, and the
+survival mechanisms converted the unbounded floating loss into a realized
+bleed of ~$1,700-1,850/mo that no realistic rebate rate ($5-15/lot; break-even
+here $23-93/lot) can cover. Max floating DD ~$10.8k ⇒ margin call on $10k.
+A larger account avoids the blowup but not the negative net economics.
+
+**Verdict: on trending regimes the CB engine cannot pay for the grid. Do not
+run this EA unattended on gold with the recommended set.** If used at all, it
+needs a regime filter (range-only operation) and per-month kill criteria —
+and that modified system would require its own Phase C pass.
