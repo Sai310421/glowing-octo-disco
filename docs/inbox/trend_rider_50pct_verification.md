@@ -85,3 +85,29 @@ rebates at contained DD. Honest limits: one period, one instrument, defaults
 untuned, and per-cycle edge remains statistically indistinguishable from
 zero (t ≈ 0.2 over 1,908 cycles) — the +$57/mo sign is within noise; the CB
 component is the only deterministic part.
+
+## Regime-gate walk-forward (added after "トレンド方向のみでも黒字化は無理？")
+
+Question: can a CAUSAL regime filter keep the SAR flat through the weak
+stretch (Mar–Jul: ungated −$148/mo net, −$79/mo with CB on the WF test
+months) without hindsight? Harness: `scripts/trend_rider_regime_wf.py` —
+long-window Kaufman ER on M5 as an on/off gate, hysteresis thresholds taken
+ONLY from the trailing 2 months' ER quantiles, tested on the following month.
+
+| variant | net /mo | +CB /mo | note |
+|---|---|---|---|
+| ungated baseline (test months Mar–Jul) | −$148 | −$79 | the weak regime |
+| WF with per-fold config selection | −$119 | −$79 | selection overfits the train window — no gain |
+| fixed config N=100 q_on=0.5 (causal thresholds) | **+$26** | **+$60** | flat ~40% of the time, DD lower |
+| all 12 fixed configs | 9/12 beat baseline; 6/12 positive with CB | | N=100–250 all improve; N=500 (~2wk) harmful |
+| oracle full-period best (HINDSIGHT ceiling) | +$350 | +$381 | what a perfect gate is worth |
+
+Findings: (1) the gate concept transfers causally — a 1–2-day ER window
+robustly turns the weak months from −$148/mo to ≈+$26/mo net (+$60 with CB);
+(2) per-fold re-optimization of the gate is WORSE than a fixed sane config —
+the selection step, not the gate, is where overfitting lives; (3) the gap to
+the oracle (+$350/mo) is the remaining information gap: knowing WHEN the
+regime flips is worth ~10× more than everything else tuned so far. Answer to
+the user's question: trend-direction-only IS black-ink capable — ungated it
+earns only in trending regimes (+$57/mo full-period average), and a causal
+ER gate holds the weak regime near break-even instead of bleeding.
