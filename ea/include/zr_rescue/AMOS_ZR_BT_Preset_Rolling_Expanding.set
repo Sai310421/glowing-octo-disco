@@ -1,0 +1,7 @@
+; AMOS ZR Rescue BT preset A: rolling anchor + expanding zone
+InpZoneWidthFactor=1.10
+InpZoneAnchorMode=1
+InpZRCommissionPerLotRound=0.0
+InpZROrderFailFreezeEnabled=true
+InpZROrderFailFreezePips=2.0
+InpZROrderFreezeBars=1

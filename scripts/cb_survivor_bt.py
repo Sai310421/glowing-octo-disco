@@ -421,3 +421,185 @@ def simulate_lock(df, spread=0.28, slip=0.04, p=P, cb_per_lot=15.0, cb_to_pool=F
                 max_float_dd=max_float_dd, max_lots=max_lots, max_dd=max_dd,
                 trades=n_trades, lock_events=lock_events, tailcuts=tailcuts,
                 end_float=0.0)
+
+
+def simulate_zr(df, spread=0.28, slip=0.04, p=P, adx_limit=32.0,
+                zone_atr_mult=0.25, lot_coeff=1.35, max_turns=4,
+                cb_per_lot=15.0, max_hold_bars=360, dd_hard=0.08):
+    """v3 - ZR RescueModule dynamics (user's AMOS_ZR v1.02) on the CB grid:
+    a stuck position is handed to a Zone Recovery basket (zone = ATR_H1 x
+    0.25, alternating entries x1.35, max 4 turns, completion when basket
+    PnL + CB credit >= 0), gated by the module's guards: no new rescue in
+    a strong trend (ADX M15 > limit), hard equity-DD stop, basket time
+    stop. One active basket at a time (module design). TailCut/pool still
+    amortize other stuck positions meanwhile."""
+    dfi = df.set_index("time")
+    m15 = dfi["close"].resample("15min").last().dropna()
+    h1_h = dfi["high"].resample("1h").max().dropna()
+    h1_l = dfi["low"].resample("1h").min().dropna()
+    h1_c = dfi["close"].resample("1h").last().dropna()
+    tr = np.maximum(h1_h - h1_l,
+                    np.maximum((h1_h - h1_c.shift()).abs(), (h1_l - h1_c.shift()).abs()))
+    atr_h1 = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    # Wilder ADX(14) on M15
+    up = m15.diff()
+    dn = -m15.diff()
+    plus = up.where((up > dn) & (up > 0), 0.0)
+    minus = dn.where((dn > up) & (dn > 0), 0.0)
+    trm = m15.diff().abs()
+    a = 1 / 14
+    pdi = 100 * plus.ewm(alpha=a, adjust=False).mean() / trm.ewm(alpha=a, adjust=False).mean().replace(0, np.nan)
+    mdi = 100 * minus.ewm(alpha=a, adjust=False).mean() / trm.ewm(alpha=a, adjust=False).mean().replace(0, np.nan)
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    adx = dx.ewm(alpha=a, adjust=False).mean()
+    atr1m = atr_h1.reindex(dfi.index, method="ffill").fillna(5.0).values
+    adx1m = adx.reindex(dfi.index, method="ffill").fillna(20.0).values
+
+    c = df["close"].values
+    n = len(c)
+    half = (spread / 2 + slip) * CONTRACT
+
+    eq = START_EQ
+    base_eq = eq
+    pool = 0.0
+    buys, sells = [], []
+    zr = None                # active rescue basket
+    closed_lots = 0.0
+    n_trades = 0
+    max_float_dd = 0.0
+    max_lots = 0.0
+    peak = eq
+    max_dd = 0.0
+    rescues = completed = timeouts = 0
+
+    def realize(pnl, lots):
+        nonlocal eq, pool, closed_lots, n_trades
+        eq += pnl; pool += pnl; closed_lots += lots; n_trades += 1
+
+    def basket_pnl(px):
+        return sum(d * (px - e) * l * CONTRACT for l, e, d in zr["legs"])
+
+    for i in range(n):
+        px = c[i]
+        fb = sum((px - e) * l * CONTRACT for l, e in buys)
+        fs = sum((e - px) * l * CONTRACT for l, e in sells)
+        fz = basket_pnl(px) if zr else 0.0
+        eqty = eq + fb + fs + fz
+        peak = max(peak, eqty)
+        max_dd = max(max_dd, (peak - eqty) / peak)
+        max_float_dd = max(max_float_dd, -(fb + fs + fz))
+        tot = sum(l for l, _ in buys) + sum(l for l, _ in sells) + \
+              (sum(l for l, _, _ in zr["legs"]) if zr else 0.0)
+        max_lots = max(max_lots, tot)
+        if eqty <= 0:
+            return dict(blown=True, eq=eqty, closed_lots=closed_lots,
+                        max_float_dd=max_float_dd, max_lots=max_lots, max_dd=max_dd,
+                        trades=n_trades, rescues=rescues, completed=completed,
+                        timeouts=timeouts)
+        if pool < 0:
+            pool = 0.0
+
+        # ---- basket TP over non-stuck (main grid)
+        bp = 0.0
+        for l, e in buys:
+            v = (px - e) * l * CONTRACT
+            if -v <= p["stuck"]: bp += v - half * l
+        for l, e in sells:
+            v = (e - px) * l * CONTRACT
+            if -v <= p["stuck"]: bp += v - half * l
+        if bp >= p["normal_profit"]:
+            nb, ns = [], []
+            for l, e in buys:
+                v = (px - e) * l * CONTRACT
+                if -v <= p["stuck"]: realize(v - half * l, l)
+                else: nb.append((l, e))
+            for l, e in sells:
+                v = (e - px) * l * CONTRACT
+                if -v <= p["stuck"]: realize(v - half * l, l)
+                else: ns.append((l, e))
+            buys, sells = nb, ns
+
+        # ---- TailCut on remaining stuck (not in ZR)
+        worst = None
+        for lst, sign in ((buys, +1), (sells, -1)):
+            for k, (l, e) in enumerate(lst):
+                v = sign * (px - e) * l * CONTRACT
+                if -v > p["stuck"] and (worst is None or v < worst[0]):
+                    worst = (v, lst, k, sign)
+        if worst and pool >= -worst[0]:
+            v, lst, k, sign = worst
+            l, e = lst.pop(k)
+            realize(sign * (px - e) * l * CONTRACT - half * l, l)
+
+        # ---- ZR rescue basket
+        if zr is None and worst is not None and adx1m[i] < adx_limit:
+            # hand the worst remaining stuck position to Zone Recovery
+            v, lst, k, sign = worst
+            if k < len(lst):
+                l, e = lst.pop(k)
+                zr = {"legs": [(l, e, sign)], "anchor": px,
+                      "w": max(atr1m[i] * zone_atr_mult, 0.5),
+                      "turns": 0, "last": sign, "lot": l, "start": i}
+                rescues += 1
+        if zr is not None:
+            done = False
+            comp = basket_pnl(px) - half * sum(l for l, _, _ in zr["legs"]) \
+                   + cb_per_lot * sum(l for l, _, _ in zr["legs"])   # PCI completion w/ CB credit
+            if comp >= 0.0:
+                done = True; completed += 1
+            elif i - zr["start"] >= max_hold_bars or (peak - eqty) / peak >= dd_hard:
+                done = True; timeouts += 1
+            elif zr["turns"] < max_turns:
+                lo, hi = zr["anchor"] - zr["w"], zr["anchor"]
+                if px <= lo and zr["last"] != -1:
+                    lot = round(zr["lot"] * lot_coeff, 2)
+                    zr["legs"].append((lot, px - (spread / 2 + slip), -1))
+                    zr["lot"] = lot; zr["last"] = -1; zr["turns"] += 1
+                    eq -= half * lot
+                elif px >= hi and zr["last"] != +1:
+                    lot = round(zr["lot"] * lot_coeff, 2)
+                    zr["legs"].append((lot, px + (spread / 2 + slip), +1))
+                    zr["lot"] = lot; zr["last"] = +1; zr["turns"] += 1
+                    eq -= half * lot
+            if done:
+                for l, e, d in zr["legs"]:
+                    realize(d * (px - e) * l * CONTRACT - half * l, l)
+                zr = None
+
+        # ---- bulk clear
+        fb = sum((px - e) * l * CONTRACT for l, e in buys)
+        fs = sum((e - px) * l * CONTRACT for l, e in sells)
+        fz = basket_pnl(px) if zr else 0.0
+        if eq + fb + fs + fz >= base_eq + p["bulk_clear"]:
+            for l, e in buys: realize((px - e) * l * CONTRACT - half * l, l)
+            for l, e in sells: realize((e - px) * l * CONTRACT - half * l, l)
+            if zr:
+                for l, e, d in zr["legs"]:
+                    realize(d * (px - e) * l * CONTRACT - half * l, l)
+                zr = None
+            buys, sells = [], []
+            base_eq = eq
+
+        # ---- seeding + nanpin, gated by the module's trend guard
+        def level_lot(lvl):
+            return p["base_lot"] * (p["lot_mult"] if lvl >= p["lot_from"] else 1.0)
+        if adx1m[i] < adx_limit:     # InpZRDisableStrongTrend applied to new grid risk
+            if not buys:
+                buys.append((level_lot(1), px + spread / 2 + slip))
+            elif len(buys) < p["max_pos"] and buys[-1][1] - px >= p["nanpin_pips"] * PIP:
+                buys.append((level_lot(len(buys) + 1), px + spread / 2 + slip))
+            if not sells:
+                sells.append((level_lot(1), px - spread / 2 - slip))
+            elif len(sells) < p["max_pos"] and px - sells[-1][1] >= p["nanpin_pips"] * PIP:
+                sells.append((level_lot(len(sells) + 1), px - spread / 2 - slip))
+
+    px = c[-1]
+    for l, e in buys: realize((px - e) * l * CONTRACT - half * l, l)
+    for l, e in sells: realize((e - px) * l * CONTRACT - half * l, l)
+    if zr:
+        for l, e, d in zr["legs"]:
+            realize(d * (px - e) * l * CONTRACT - half * l, l)
+    return dict(blown=False, eq=eq, closed_lots=closed_lots,
+                max_float_dd=max_float_dd, max_lots=max_lots, max_dd=max_dd,
+                trades=n_trades, rescues=rescues, completed=completed,
+                timeouts=timeouts)
