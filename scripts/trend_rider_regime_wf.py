@@ -12,11 +12,20 @@ Hysteresis thresholds are set from the TRAIN window's ER quantiles only
   ER >= quantile(train, q_on)  -> trading ON
   ER <  quantile(train, q_off) -> trading OFF (close all, sit flat)
 
-Walk-forward: train 2 months -> test 1 month, rolling monthly. The config
-(N, q_on, q_off) with the best train net+CB is applied to each test month.
-Baseline = ungated SAR on the same test months. An in-sample "oracle"
-(best single config over the full period) is reported only as the
-hindsight ceiling, clearly labeled.
+Walk-forward: train 2 months -> test 1 month, rolling monthly.
+
+IMPORTANT (fixed after review): every variant below - baseline, each of the
+12 fixed (N, q_on) candidates, and the per-fold-selected config - is run as
+ONE CONTINUOUS simulation across the whole test span (first test month's
+start to the last test month's end), not as separate per-month sim() calls.
+The only thing that changes between months is which gate array segment is
+active (each month's thresholds still come only from ITS OWN trailing
+2-month train window, so causality is preserved); positions, breakout
+anchors and trailing state now carry across month boundaries exactly as
+they would in live trading. Every fixed candidate's continuous result is
+serialized to reports/trend_rider_regime_wf.json - "N of 12 beat baseline"
+and the headline config are read directly from that array, not typed in by
+hand.
 
 Costs: corrected model (adverse entry embeds the entry side; HALF charged
 on exit only). Same data and defaults as scripts/trend_direction_bt.py.
@@ -33,10 +42,18 @@ SPREAD = 0.28
 SLIP = 0.04
 HALF = (SPREAD / 2 + SLIP) * CONTRACT
 LOT = 0.01
+BAR_MIN = 5  # M5
 
 ER_WINDOWS = (100, 250, 500)
 Q_ON = (0.40, 0.50, 0.60, 0.70)
 Q_OFF_GAP = 0.20
+
+
+def bars_to_human(n_bars):
+    hours = n_bars * BAR_MIN / 60.0
+    if hours < 36:
+        return f"{hours:.1f}h"
+    return f"{hours/24.0:.1f}d"
 
 
 def load(path):
@@ -73,8 +90,10 @@ def er_series(c, csum, n_er):
 def sim(c, atr, csum, gate, i0, i1,
         c_atr=2.0, k_trail=2.0, er_n=20, er_lo=0.30, er_hi=0.45,
         w_range=2.0, n_max=7):
-    """SAR core (corrected costs) over bars [i0, i1); gate=None -> ungated."""
-    eq = 0.0                       # PnL only; DD tracked on START_EQ + PnL
+    """SAR core (corrected costs) over bars [i0, i1); gate=None -> ungated.
+    ONE continuous pass - caller is responsible for the gate array already
+    spanning [i0, i1) with fold-appropriate (causal) thresholds baked in."""
+    eq = 0.0
     peak, max_dd = START_EQ, 0.0
     dirn = 0
     entries = []
@@ -91,13 +110,13 @@ def sim(c, atr, csum, gate, i0, i1,
 
         if not allowed:
             off_bars += 1
-            if dirn != 0:          # close everything, sit flat
+            if dirn != 0:
                 for e in entries:
                     eq += dirn * (px - e) * LOT * CONTRACT - HALF * LOT
                     vol += LOT
                 dirn = 0
                 entries = []
-            flat_hi = flat_lo = px # keep breakout anchors fresh
+            flat_hi = flat_lo = px
             trail_lv = 0.0
             continue
 
@@ -153,10 +172,9 @@ def sim(c, atr, csum, gate, i0, i1,
                 off_frac=off_bars / max(i1 - i0, 1))
 
 
-def build_gate(er, thr_on, thr_off, i0, i1):
-    """Hysteresis gate over [i0, i1); starts ON if er[i0] >= thr_on."""
-    n = len(er)
-    g = np.zeros(n, dtype=bool)
+def hysteresis_from_quantiles(er, thr_on, thr_off, i0, i1):
+    """Hysteresis gate segment over [i0, i1); starts ON if er[i0] >= thr_on."""
+    g = np.zeros(len(er), dtype=bool)
     state = bool(er[i0] >= thr_on) if not np.isnan(er[i0]) else False
     for i in range(i0, i1):
         e = er[i]
@@ -177,6 +195,14 @@ def month_slices(times):
     return out
 
 
+def causal_thresholds(er, n_er, tr0, tr1, q_on):
+    vals = er[max(tr0, n_er):tr1]
+    vals = vals[~np.isnan(vals)]
+    thr_on = np.quantile(vals, q_on)
+    thr_off = np.quantile(vals, max(q_on - Q_OFF_GAP, 0.0))
+    return thr_on, thr_off
+
+
 def main():
     path = os.environ.get("CB_DATA",
         "/tmp/claude-0/-home-user-glowing-octo-disco/74058501-f7f7-5fe1-b123-2e20f42fe8bd/scratchpad/uploads/wfo_data/XAUUSD_1m_20260104_20260703_orkad.csv")
@@ -184,83 +210,119 @@ def main():
     ers = {n: er_series(c, csum, n) for n in ER_WINDOWS}
     months = month_slices(times)
     print("months:", [m[0] for m in months])
+    print("ER window durations:", {n: bars_to_human(n) for n in ER_WINDOWS})
 
     warm = max(ER_WINDOWS) + 30
+    n_bars = len(c)
 
-    def run_cfg(n_er, q_on, i_tr0, i_tr1, i_te0, i_te1):
+    # continuous test span = first test fold's start .. last month's end
+    test_i0 = months[2][1]
+    test_i1 = months[-1][2]
+    test_months_days = (pd.to_datetime(times[test_i1 - 1]) - pd.to_datetime(times[test_i0])).days / 30.4
+
+    def continuous_gate_for_family(n_er, q_on_fn):
+        """Build one gate array spanning [test_i0, test_i1) by stitching each
+        month's OWN causal thresholds (from its trailing 2-month window).
+        q_on_fn(month_index) -> q_on to use for that month (fixed or selected)."""
         er = ers[n_er]
-        tr_vals = er[max(i_tr0, n_er):i_tr1]
-        tr_vals = tr_vals[~np.isnan(tr_vals)]
-        thr_on = np.quantile(tr_vals, q_on)
-        thr_off = np.quantile(tr_vals, max(q_on - Q_OFF_GAP, 0.0))
-        g_tr = build_gate(er, thr_on, thr_off, i_tr0, i_tr1)
-        g_te = build_gate(er, thr_on, thr_off, i_te0, i_te1)
-        r_tr = sim(c, atr, csum, g_tr, i_tr0, i_tr1)
-        r_te = sim(c, atr, csum, g_te, i_te0, i_te1)
-        return r_tr, r_te
+        g = np.zeros(n_bars, dtype=bool)
+        for k in range(2, len(months)):
+            tr0 = max(months[k - 2][1], warm)
+            tr1 = months[k - 1][2]
+            te0, te1 = months[k][1], months[k][2]
+            q_on = q_on_fn(k)
+            thr_on, thr_off = causal_thresholds(er, n_er, tr0, tr1, q_on)
+            seg = hysteresis_from_quantiles(er, thr_on, thr_off, te0, te1)
+            g[te0:te1] = seg[te0:te1]
+        return g
 
-    # --- walk-forward: train = 2 preceding months, test = next month ---
-    wf_rows = []
+    # --- baseline: continuous, no gate ---
+    base = sim(c, atr, csum, None, test_i0, test_i1)
+    base_net_mo = base["net"] / test_months_days
+    base_cb_mo = (base["net"] + base["vol"] * 15.0) / test_months_days
+    print(f"\nbaseline (continuous, {test_months_days:.1f}mo): "
+          f"net={base_net_mo:+7.2f}/mo  +CB={base_cb_mo:+7.2f}/mo  maxDD={base['max_dd']*100:5.1f}%")
+
+    # --- all 12 fixed configs, each run as ONE continuous sim ---
+    fixed_results = []
+    for n_er in ER_WINDOWS:
+        for q_on in Q_ON:
+            g = continuous_gate_for_family(n_er, lambda k, q=q_on: q)
+            r = sim(c, atr, csum, g, test_i0, test_i1)
+            net_mo = r["net"] / test_months_days
+            cb_mo = (r["net"] + r["vol"] * 15.0) / test_months_days
+            fixed_results.append(dict(n_er=n_er, q_on=q_on, net_mo=net_mo, cb_mo=cb_mo,
+                                      off_frac=r["off_frac"], max_dd=r["max_dd"], flips=r["flips"]))
+            print(f"fixed N={n_er:3d} ({bars_to_human(n_er)}) q_on={q_on:.2f}: "
+                  f"net={net_mo:+7.2f}/mo  +CB={cb_mo:+7.2f}/mo  off={r['off_frac']*100:4.1f}%  "
+                  f"maxDD={r['max_dd']*100:4.1f}%")
+
+    beat = sum(1 for r in fixed_results if r["net_mo"] > base_net_mo)
+    pos_cb = sum(1 for r in fixed_results if r["cb_mo"] > 0)
+    headline = max(fixed_results, key=lambda r: r["net_mo"])
+    print(f"\nfixed-config family: {beat}/{len(fixed_results)} beat the continuous baseline "
+          f"({base_net_mo:+.2f}/mo); {pos_cb}/{len(fixed_results)} positive net+CB")
+    print(f"best fixed config (in-sample search over this family): N={headline['n_er']} "
+          f"q_on={headline['q_on']:.2f} -> net={headline['net_mo']:+.2f}/mo +CB={headline['cb_mo']:+.2f}/mo")
+
+    # --- per-fold selection (selects (N,q_on) per fold from TRAIN score only) ---
+    def per_fold_q_on(k):
+        er_choices = {}
+        for n_er in ER_WINDOWS:
+            er = ers[n_er]
+            tr0 = max(months[k - 2][1], warm)
+            tr1 = months[k - 1][2]
+            best = None
+            for q_on in Q_ON:
+                thr_on, thr_off = causal_thresholds(er, n_er, tr0, tr1, q_on)
+                g_tr = hysteresis_from_quantiles(er, thr_on, thr_off, tr0, tr1)
+                r_tr = sim(c, atr, csum, g_tr, tr0, tr1)
+                score = r_tr["net"] + r_tr["vol"] * 15.0
+                if best is None or score > best[0]:
+                    best = (score, n_er, q_on)
+            er_choices[n_er] = best
+        best_overall = max(er_choices.values(), key=lambda t: t[0])
+        return best_overall[1], best_overall[2]  # n_er, q_on
+
+    g_wf = np.zeros(n_bars, dtype=bool)
+    wf_fold_log = []
     for k in range(2, len(months)):
+        n_er, q_on = per_fold_q_on(k)
         tr0 = max(months[k - 2][1], warm)
         tr1 = months[k - 1][2]
         te0, te1 = months[k][1], months[k][2]
-        mdays = (pd.to_datetime(times[te1 - 1]) - pd.to_datetime(times[te0])).days / 30.4
-        best = None
-        for n_er in ER_WINDOWS:
-            for q_on in Q_ON:
-                r_tr, r_te = run_cfg(n_er, q_on, tr0, tr1, te0, te1)
-                score = r_tr["net"] + r_tr["vol"] * 15.0
-                if best is None or score > best[0]:
-                    best = (score, n_er, q_on, r_te)
-        base = sim(c, atr, csum, None, te0, te1)
-        _, n_er, q_on, r_te = best
-        wf_rows.append(dict(month=months[k][0], n_er=n_er, q_on=q_on,
-                            gated=r_te, base=base, mdays=mdays))
-        print(f"{months[k][0]}: pick N={n_er} q_on={q_on:.2f} | "
-              f"gated net={r_te['net']/mdays:+7.2f}/mo (+CB {(r_te['net']+r_te['vol']*15)/mdays:+7.2f}) "
-              f"off={r_te['off_frac']*100:4.1f}% DD={r_te['max_dd']*100:4.1f}% | "
-              f"base net={base['net']/mdays:+7.2f}/mo (+CB {(base['net']+base['vol']*15)/mdays:+7.2f}) "
-              f"DD={base['max_dd']*100:4.1f}%")
+        thr_on, thr_off = causal_thresholds(ers[n_er], n_er, tr0, tr1, q_on)
+        seg = hysteresis_from_quantiles(ers[n_er], thr_on, thr_off, te0, te1)
+        g_wf[te0:te1] = seg[te0:te1]
+        wf_fold_log.append(dict(month=months[k][0], n_er=n_er, q_on=q_on))
+    r_wf = sim(c, atr, csum, g_wf, test_i0, test_i1)
+    wf_net_mo = r_wf["net"] / test_months_days
+    wf_cb_mo = (r_wf["net"] + r_wf["vol"] * 15.0) / test_months_days
+    print(f"\nper-fold selection (continuous): net={wf_net_mo:+7.2f}/mo  +CB={wf_cb_mo:+7.2f}/mo  "
+          f"maxDD={r_wf['max_dd']*100:5.1f}%  folds={wf_fold_log}")
 
-    tot_m = sum(r["mdays"] for r in wf_rows)
-    g_net = sum(r["gated"]["net"] for r in wf_rows)
-    g_cb = sum(r["gated"]["vol"] for r in wf_rows) * 15.0
-    b_net = sum(r["base"]["net"] for r in wf_rows)
-    b_cb = sum(r["base"]["vol"] for r in wf_rows) * 15.0
-    print(f"\nWF total ({tot_m:.1f}mo, test months only):")
-    print(f"  gated : net={g_net/tot_m:+7.2f}/mo  +CB={(g_net+g_cb)/tot_m:+7.2f}/mo  "
-          f"maxDD(worst month)={max(r['gated']['max_dd'] for r in wf_rows)*100:.1f}%")
-    print(f"  base  : net={b_net/tot_m:+7.2f}/mo  +CB={(b_net+b_cb)/tot_m:+7.2f}/mo  "
-          f"maxDD(worst month)={max(r['base']['max_dd'] for r in wf_rows)*100:.1f}%")
-
-    # --- hindsight ceiling: best single config over the full period ---
-    i0, i1 = warm, len(c)
-    full_m = (pd.to_datetime(times[i1 - 1]) - pd.to_datetime(times[i0])).days / 30.4
-    best = None
-    for n_er in ER_WINDOWS:
-        for q_on in Q_ON:
-            er = ers[n_er]
-            vals = er[n_er:i1]
-            vals = vals[~np.isnan(vals)]
-            thr_on = np.quantile(vals, q_on)
-            thr_off = np.quantile(vals, max(q_on - Q_OFF_GAP, 0.0))
-            g = build_gate(er, thr_on, thr_off, i0, i1)
-            r = sim(c, atr, csum, g, i0, i1)
-            score = r["net"] + r["vol"] * 15.0
-            if best is None or score > best[0]:
-                best = (score, n_er, q_on, r)
-    _, n_er, q_on, r = best
-    print(f"\nOracle (full-period best, HINDSIGHT ONLY): N={n_er} q_on={q_on:.2f} "
-          f"net={r['net']/full_m:+7.2f}/mo +CB={(r['net']+r['vol']*15)/full_m:+7.2f}/mo "
-          f"off={r['off_frac']*100:.1f}% DD={r['max_dd']*100:.1f}%")
+    # --- in-sample searched optimum over this ER-gate family (NOT a ceiling
+    #     on all possible gates - just the best of the 12 candidates tested,
+    #     applied causally fold-by-fold like the fixed configs above but
+    #     picked with full-period hindsight) ---
+    searched_best = max(fixed_results, key=lambda r: r["net_mo"])
+    print(f"\nin-sample searched optimum (hindsight pick among the 12 candidates, "
+          f"NOT an upper bound on all possible gates): N={searched_best['n_er']} "
+          f"q_on={searched_best['q_on']:.2f} net={searched_best['net_mo']:+.2f}/mo "
+          f"+CB={searched_best['cb_mo']:+.2f}/mo")
 
     with open(os.path.join(os.path.dirname(__file__), "..", "reports",
                            "trend_rider_regime_wf.json"), "w") as f:
-        json.dump(dict(wf=[{**row, "gated": row["gated"], "base": row["base"]}
-                           for row in wf_rows],
-                       oracle=dict(n_er=n_er, q_on=q_on, **r)),
-                  f, indent=1, default=float)
+        json.dump(dict(
+            test_months_days=test_months_days,
+            baseline=dict(net_mo=base_net_mo, cb_mo=base_cb_mo, max_dd=base["max_dd"]),
+            fixed_configs=fixed_results,
+            beat_baseline_count=beat,
+            positive_with_cb_count=pos_cb,
+            per_fold_selection=dict(net_mo=wf_net_mo, cb_mo=wf_cb_mo,
+                                    max_dd=r_wf["max_dd"], folds=wf_fold_log),
+            searched_optimum=searched_best,
+        ), f, indent=1, default=float)
 
 
 if __name__ == "__main__":

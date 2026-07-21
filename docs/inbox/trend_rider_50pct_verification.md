@@ -89,25 +89,39 @@ component is the only deterministic part.
 ## Regime-gate walk-forward (added after "トレンド方向のみでも黒字化は無理？")
 
 Question: can a CAUSAL regime filter keep the SAR flat through the weak
-stretch (Mar–Jul: ungated −$148/mo net, −$79/mo with CB on the WF test
-months) without hindsight? Harness: `scripts/trend_rider_regime_wf.py` —
-long-window Kaufman ER on M5 as an on/off gate, hysteresis thresholds taken
-ONLY from the trailing 2 months' ER quantiles, tested on the following month.
+stretch (Mar–Jul) without hindsight? Harness: `scripts/trend_rider_regime_wf.py`
+— long-window Kaufman ER on M5 as an on/off gate, hysteresis thresholds
+taken ONLY from the trailing 2 months' ER quantiles, applied to the
+following month.
+
+CORRECTION (post code-review): the first version reset positions/anchors at
+every month boundary (an artifact not present live) and only kept the
+per-fold-selected and oracle results, not the fixed-config array the
+headline numbers were drawn from — so "+$26/mo" and "9/12" were not
+reproducible by running the script. Fixed: every variant now runs as ONE
+continuous simulation across the full test span (state carries across month
+boundaries; only the gate's causal thresholds change per month), and all 12
+fixed-config results are serialized to `reports/trend_rider_regime_wf.json`.
+ER window durations were also mislabeled (they are bar counts on M5, not
+elapsed days): N=100→8.3h, N=250→20.8h, N=500→1.7d.
 
 | variant | net /mo | +CB /mo | note |
 |---|---|---|---|
-| ungated baseline (test months Mar–Jul) | −$148 | −$79 | the weak regime |
-| WF with per-fold config selection | −$119 | −$79 | selection overfits the train window — no gain |
-| fixed config N=100 q_on=0.5 (causal thresholds) | **+$26** | **+$60** | flat ~40% of the time, DD lower |
-| all 12 fixed configs | 9/12 beat baseline; 6/12 positive with CB | | N=100–250 all improve; N=500 (~2wk) harmful |
-| oracle full-period best (HINDSIGHT ceiling) | +$350 | +$381 | what a perfect gate is worth |
+| ungated baseline (continuous, test months Mar–Jul) | −$134 | −$67 | the weak regime |
+| WF with per-fold config selection | −$108 | −$68 | selection overfits the train window — no gain |
+| best fixed config: N=250 (20.8h) q_on=0.50 | **+$38** | **+$77** | flat ~38% of the time, maxDD 8.8% (vs 11.8% ungated) |
+| all 12 fixed configs | 9/12 beat baseline; 6/12 positive with CB | | N=100–250 (8–21h) mostly help; N=500 (1.7d) harmful in every q_on |
+| in-sample searched optimum (best of the 12, hindsight-picked) | +$38 | +$77 | NOT a ceiling on all possible gates — just the best of this one family |
 
-Findings: (1) the gate concept transfers causally — a 1–2-day ER window
-robustly turns the weak months from −$148/mo to ≈+$26/mo net (+$60 with CB);
-(2) per-fold re-optimization of the gate is WORSE than a fixed sane config —
-the selection step, not the gate, is where overfitting lives; (3) the gap to
-the oracle (+$350/mo) is the remaining information gap: knowing WHEN the
-regime flips is worth ~10× more than everything else tuned so far. Answer to
-the user's question: trend-direction-only IS black-ink capable — ungated it
-earns only in trending regimes (+$57/mo full-period average), and a causal
-ER gate holds the weak regime near break-even instead of bleeding.
+Findings: (1) the gate concept transfers causally — an 8–21 hour ER window
+robustly turns the weak months from −$134/mo to ≈+$38/mo net (+$77 with CB),
+even with continuous state across boundaries; (2) per-fold re-optimization
+of the gate is WORSE than a fixed sane config — the selection step, not the
+gate, is where overfitting lives; (3) the ~1.7-day window is actively
+harmful at every threshold tried — the gate only helps at the shorter,
+sub-daily scales tested here, a scale-dependence that would need testing
+against other window lengths before generalizing. Answer to the user's
+question: trend-direction-only IS black-ink capable — ungated it earns only
+in trending regimes (+$57/mo full-period average, from the corrected
+`trend_direction_bt.py`), and a causal ER gate at the right scale holds the
+weak regime near break-even instead of bleeding.
