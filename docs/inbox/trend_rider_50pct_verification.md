@@ -58,3 +58,22 @@ unavailable here. Note the uploaded factory's own `objective.yaml` targets
    walk-forward WFE ≥ 50 (their own bar) — then gate SAR entries on it.
 3. Re-run this Monte Carlo with persistence re-estimated from the real data
    instead of the literature prior.
+
+## Real-data follow-up (added later): trend-direction-only architectures
+
+After the real 1m series arrived, the counter-trend CB grid lost ~$1,700/mo
+and blew a $10k account under every rescue architecture tested (freeze+pool,
+ZR rescue, macro gating). The same period, same costs, trend-direction-only
+(`scripts/trend_direction_bt.py`, default params, no optimization):
+
+| architecture | net (no CB) | net + CB@15 | maxDD | note |
+|---|---|---|---|---|
+| one-sided trend grid (H1 EMA dir, pullback nanpin) | −$387/mo | **+$226/mo** | **83.6%** | first net-positive, but one deep pullback nearly killed it (float $11.7k) |
+| Trend Rider SAR (video mechanism, M5, 0.01×7) | −$24/mo | **+$44/mo** | **14.5%** | break-even before rebates, contained risk |
+
+The sign of the whole system is decided by trade direction relative to the
+trend — not by exits, rescues, pools or hedges. On this trending half-year
+the video's SAR mechanism is break-even at costs on real data (vs -$1,700/mo
+counter-trend), and per-lot rebates put it modestly positive. Honest limits:
+one period, one instrument, defaults untuned, CB rate must actually be paid,
+and the one-sided grid's +$226/mo is not deployable at 83.6% maxDD.
