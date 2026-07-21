@@ -1,0 +1,7 @@
+; AMOS ZR Rescue BT preset B: fixed first anchor + fixed zone width
+InpZoneWidthFactor=1.00
+InpZoneAnchorMode=0
+InpZRCommissionPerLotRound=0.0
+InpZROrderFailFreezeEnabled=true
+InpZROrderFailFreezePips=2.0
+InpZROrderFreezeBars=1

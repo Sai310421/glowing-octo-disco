@@ -1,0 +1,44 @@
+{
+ "0.2": {
+  "blown": true,
+  "eq": -5.180000015842172,
+  "closed_lots": 373.12999999980565,
+  "max_float_dd": 617.990000000008,
+  "max_lots": 0.17,
+  "max_dd": 1.0005176097238524,
+  "trades": 37313,
+  "rescues": 7970,
+  "completed": 22,
+  "timeouts": 7948,
+  "net_no_cb": -10005.180000015842,
+  "gate": "H1 ADX<25"
+ },
+ "0.28": {
+  "blown": true,
+  "eq": -0.4500000101920669,
+  "closed_lots": 302.6199999998698,
+  "max_float_dd": 406.8400000000038,
+  "max_lots": 0.16,
+  "max_dd": 1.0000449669952447,
+  "trades": 30262,
+  "rescues": 7098,
+  "completed": 32,
+  "timeouts": 7066,
+  "net_no_cb": -10000.450000010193,
+  "gate": "H1 ADX<25"
+ },
+ "0.35": {
+  "blown": true,
+  "eq": -0.42000000431078943,
+  "closed_lots": 226.2599999999392,
+  "max_float_dd": 1255.3349999999964,
+  "max_lots": 0.18,
+  "max_dd": 1.000041969928977,
+  "trades": 22626,
+  "rescues": 6043,
+  "completed": 6,
+  "timeouts": 6037,
+  "net_no_cb": -10000.420000004311,
+  "gate": "H1 ADX<25"
+ }
+}

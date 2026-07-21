@@ -30,12 +30,21 @@ Trend Rider is the *symmetric, always-in, stop-and-reverse* mechanism the source
 video actually shows; Drift Grid is the drift-biased simplification. They fail in
 different regimes — **Rider dies in chop, Grid dies on spikes** — so backtest both.
 
-## 3. XAUUSD research (shares the tooling; no deployable output)
+## 3. XAUUSD / cashback line (real 2026-H1 1m data where noted)
 
-| Item | File | Verdict |
+| Component | File | Status | Gated on |
+|---|---|---|---|
+| CB Survivor EA (manual repro, v1.10 delta-lock pool) | `ea/strategies/cb_survivor/CBSurvivor_v1.mq5` | manual-faithful code done (assumptions flagged in README); not compiled/tested | MT5 compile + demo + Phase C |
+| ZR RescueModule (user-supplied v1.01/v1.02) | `ea/include/zr_rescue/` | archived + evaluated: containment layer, not profitability | — |
+
+| Research item | File | Verdict |
 |---|---|---|
 | "50%/month" optimization loop | `docs/inbox/trend_rider_50pct_verification.md` · `scripts/trend_rider_sim.py` · `reports/trend_rider_opt.json` | **Negative** — the loop terminated on evidence, not success. Recorded so the number is not chased again without new inputs. |
-| OrkAD PCI/VWAP best candidate | `docs/inbox/pci_vwap_orkad_reverification.md` · `scripts/pci_vwap_reverify.py` · `reports/pci_vwap_reverify.json` | Independent re-verification only (source EA/data unavailable); selection-bias null test. Not confirmed. |
+| OrkAD PCI/VWAP best candidate | `docs/inbox/pci_vwap_orkad_reverification.md` · `scripts/pci_vwap_reverify.py` · `scripts/pci_vwap_bt.py` | **Failed real-data reproduction** — every plausible .set reading lands at PF 0.80–1.08 vs claimed 2.83. Do not deploy. |
+| CB Survivor economics on real data | `scripts/cb_survivor_bt.py` | **Negative** — counter-trend grid loses ~$1,700/mo and blows $10k on the trending half-year under every rescue architecture (freeze+pool, ZR, macro gating). |
+| Trend-direction-only architectures | `scripts/trend_direction_bt.py` · `reports/trend_direction_bt.json` | CORRECTED after review: one-sided grid's "+$226/mo" was H1 lookahead — it actually blows the account. Trend Rider SAR +$57/mo (no CB) / +$125/mo with CB at 11.4% maxDD; edge still t≈0.2 (statistically zero). |
+| HyperScalp v1.21 mechanical core | `scripts/hyperscalp_bt.py` · `reports/hyperscalp_bt.json` | **Negative both ways**: as-coded (SL guard rejects 11/12 limits — defect) −$17/mo; intended full cluster −$139/mo at 12.9% maxDD. Counter-move cluster loses on this trending period. |
+| Mathematical framework | `docs/inbox/mathematical_framework.md` | Kelly ceiling ~1.6%/mo with CB after cost-model correction (§7); only real structure in-sample is VR(4h)=0.83 reversion. Sign is decided by direction-vs-trend, not exits/rescues. |
 
 ## 4. Shared tooling
 
@@ -43,6 +52,7 @@ different regimes — **Rider dies in chop, Grid dies on spikes** — so backtes
 |---|---|---|
 | Monte Carlo validator | `scripts/monte_carlo_validate.py` | working |
 | MC report templates | `reports/*.mc.template.json` | honest placeholders (fail on purpose until real data) |
+| Claude Market Analyzer EA | `ea/strategies/claude_analyzer/ClaudeMarketAnalyzer.mq5` | rework of the uploaded GPT/Discord analyzer: Discord removed, analysis via Anthropic Messages API, on-chart panel + file output; not compiled/tested |
 
 Platform layers (OpenClaude review→auto-merge, spec, risk governor, intake) are in
 place; see `docs/AMOS_LEVEL50_MASTER_SPEC.md`.
