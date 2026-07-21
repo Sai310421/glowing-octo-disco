@@ -548,6 +548,12 @@ void ApplyTimeframe(const ENUM_TIMEFRAMES tf)
    g_regimeBar = 0;    // force regime/pitch/sizing recompute on the new TF
    g_atrCache  = 0.0;
    g_pitchCache = 0.0;
+   // ER distributions depend on sampling frequency - thresholds calibrated
+   // on the old TF are not valid on the new one; force recalibration now
+   g_gateThrOn      = 0.0;
+   g_gateThrOff     = 0.0;
+   g_gateErBar      = 0;
+   g_gateNextRecalc = 0;
   }
 
 void SelectTimeframe()
@@ -684,7 +690,11 @@ void RecalibrateGateThresholds()
    int windowBars = GateWindowBars();
    int secPerBar  = PeriodSeconds(g_tf);
    if(secPerBar <= 0) return;
-   int trainBars = (int)MathRound(InpGateTrainDays * 24.0 * 3600.0 / secPerBar);
+   // calendar cutoff -> bar count via timestamps (session gaps mean bars
+   // are not uniformly spaced across calendar time - weekends etc.)
+   datetime cutoff  = TimeTradeServer() - (datetime)(InpGateTrainDays * 24 * 3600);
+   int trainBars = iBarShift(_Symbol, g_tf, cutoff, false);
+   if(trainBars <= 0) trainBars = (int)MathRound(InpGateTrainDays * 24.0 * 3600.0 / secPerBar);
    int have  = Bars(_Symbol, g_tf);
    int total = MathMin(trainBars + windowBars + 5, have - 1);
    if(total < windowBars + 20) { g_gateThrOn = 0.0; return; } // not enough history yet
@@ -747,10 +757,21 @@ void UpdateRegimeGate()
 bool HandleRegimeGate()
   {
    UpdateRegimeGate();
+   // EMERGENCY owns its own cooldown regardless of the gate signal - never
+   // let the gate short-circuit ManageEmergency() into ST_GATE_OFF/ST_FLAT
+   if(g_state == ST_EMERGENCY) return(false);
+
+   bool clear = (CountPos(InpMagic, -1) + CountPos(InpMagicLock, -1) == 0 && PendingCount(-1) == 0);
+
    if(g_gateOn)
      {
-      if(g_state == ST_GATE_OFF) // gate just turned back on: resume from flat
+      if(g_state == ST_GATE_OFF) // gate just turned back on
         {
+         if(!clear) // still unwinding a rejected close/delete: stay in control
+           {
+            if(OpsAllowed()) CloseEverything();
+            return(true);
+           }
          g_dir = 0;
          ResetFlatTrackers();
          g_state = ST_FLAT;
@@ -765,8 +786,7 @@ bool HandleRegimeGate()
       g_state = ST_GATE_OFF;
       SaveState();
      }
-   if(CountPos(InpMagic, -1) + CountPos(InpMagicLock, -1) > 0 || PendingCount(-1) > 0)
-      if(OpsAllowed()) CloseEverything();
+   if(!clear && OpsAllowed()) CloseEverything();
    return(true);
   }
 

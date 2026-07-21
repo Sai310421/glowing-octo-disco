@@ -151,3 +151,22 @@ Not yet re-verified as compiled EA code (no MetaEditor in this environment).
 Default OFF until an MT5 Strategy Tester run confirms the same effect the
 Python harness measured, ideally on more than the one instrument/period
 tested so far.
+
+CORRECTION (post code-review, same day): four bugs fixed in `HandleRegimeGate()`
+/ `RecalibrateGateThresholds()` / `ApplyTimeframe()`:
+1. The gate no longer forces `ST_GATE_OFF -> ST_FLAT` while a close/delete
+   rejection has left a residual position or pending order - it keeps
+   retrying `CloseEverything()` and stays in control until the same
+   position/order counts used by the OFF path are actually zero.
+2. `ST_EMERGENCY` now retains ownership of the tick regardless of the gate
+   signal, so a lock-imbalance cooldown (`InpCooldownSec`) can no longer be
+   bypassed by the gate flipping back on mid-cooldown.
+3. `ApplyTimeframe()` now resets the gate's calibrated thresholds when the
+   auto-timeframe selector changes `g_tf` - ER distributions depend on
+   sampling frequency, so thresholds fit on the old TF are invalid on the
+   new one and are now recalibrated immediately instead of up to
+   `InpGateRecalcDays` stale.
+4. The trailing training window is now located via bar timestamps
+   (`iBarShift`) instead of assuming `InpGateTrainDays * 24h` of continuous
+   bars - session gaps (weekends etc.) made the bar-count approximation
+   diverge from the intended calendar window.
