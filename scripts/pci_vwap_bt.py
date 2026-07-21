@@ -229,10 +229,18 @@ def run(df, hours, weekdays, cfg=CFG, partial_r=False, collect_curve=False):
         edge = cfg["edge_zone_pct"] * band
         z = c[i] - vwap[i]
         direction = 0
-        if z >= band - edge:
-            direction = -1
-        elif z <= -band + edge:
-            direction = +1
+        if cfg.get("strict_zone"):
+            # strict reading: fade only INSIDE the zone [band-edge, band+edge];
+            # beyond it is breakout territory (enable_breakout=false => no trade)
+            if band - edge <= z <= band + edge:
+                direction = -1
+            elif -band - edge <= z <= -band + edge:
+                direction = +1
+        else:
+            if z >= band - edge:
+                direction = -1
+            elif z <= -band + edge:
+                direction = +1
         if direction == 0:
             continue
         slN = cfg["sl_atr"] * atr[i]
@@ -277,7 +285,11 @@ def main():
                     choices=["full", "oos", "hours", "wfo", "mc", "all"])
     ap.add_argument("--partial-r", action="store_true",
                     help="read partial_profit as 0.55R instead of 0.55% equity")
+    ap.add_argument("--strict-zone", action="store_true",
+                    help="fade only inside [band-edge, band+edge]; beyond band = no trade")
     args = ap.parse_args()
+    if args.strict_zone:
+        CFG["strict_zone"] = True
 
     df = load_data(args.data, args.tz_offset)
     out = {}
