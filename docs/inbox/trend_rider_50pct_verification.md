@@ -59,21 +59,29 @@ unavailable here. Note the uploaded factory's own `objective.yaml` targets
 3. Re-run this Monte Carlo with persistence re-estimated from the real data
    instead of the literature prior.
 
-## Real-data follow-up (added later): trend-direction-only architectures
+## Real-data follow-up: trend-direction-only architectures (CORRECTED)
 
 After the real 1m series arrived, the counter-trend CB grid lost ~$1,700/mo
 and blew a $10k account under every rescue architecture tested (freeze+pool,
 ZR rescue, macro gating). The same period, same costs, trend-direction-only
-(`scripts/trend_direction_bt.py`, default params, no optimization):
+(`scripts/trend_direction_bt.py`, default params, no optimization).
+
+CORRECTION (post code-review): the first published table contained two
+harness bugs found in review — (1) the H1 trend signal was left-labeled and
+leaked one hour of future close into the grid sim; (2) the SAR sim charged
+entry costs twice (adverse fill price AND a per-side deduction), i.e. three
+half-spreads per round trip. Corrected results:
 
 | architecture | net (no CB) | net + CB@15 | maxDD | note |
 |---|---|---|---|---|
-| one-sided trend grid (H1 EMA dir, pullback nanpin) | −$387/mo | **+$226/mo** | **83.6%** | first net-positive, but one deep pullback nearly killed it (float $11.7k) |
-| Trend Rider SAR (video mechanism, M5, 0.01×7) | −$24/mo | **+$44/mo** | **14.5%** | break-even before rebates, contained risk |
+| one-sided trend grid (H1 EMA dir, pullback nanpin) | **BLOWN** (−$1,751/mo) | −$1,534/mo | 102% | the earlier "+$226/mo" was a lookahead artifact — RETRACTED |
+| Trend Rider SAR (video mechanism, M5, 0.01×7) | **+$57/mo** | **+$125/mo** | **11.4%** | positive before rebates once the double entry cost is removed |
 
-The sign of the whole system is decided by trade direction relative to the
-trend — not by exits, rescues, pools or hedges. On this trending half-year
-the video's SAR mechanism is break-even at costs on real data (vs -$1,700/mo
-counter-trend), and per-lot rebates put it modestly positive. Honest limits:
-one period, one instrument, defaults untuned, CB rate must actually be paid,
-and the one-sided grid's +$226/mo is not deployable at 83.6% maxDD.
+The sign of the whole system is still decided by trade direction relative to
+the trend. The corrected picture is cleaner than the original: the one-sided
+grid dies like every other nanpin variant once its lookahead is removed, and
+the video's SAR mechanism is the only survivor — modestly positive before
+rebates at contained DD. Honest limits: one period, one instrument, defaults
+untuned, and per-cycle edge remains statistically indistinguishable from
+zero (t ≈ 0.2 over 1,908 cycles) — the +$57/mo sign is within noise; the CB
+component is the only deterministic part.

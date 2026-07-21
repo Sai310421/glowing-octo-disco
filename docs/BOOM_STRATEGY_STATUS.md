@@ -42,8 +42,9 @@ different regimes — **Rider dies in chop, Grid dies on spikes** — so backtes
 | "50%/month" optimization loop | `docs/inbox/trend_rider_50pct_verification.md` · `scripts/trend_rider_sim.py` · `reports/trend_rider_opt.json` | **Negative** — the loop terminated on evidence, not success. Recorded so the number is not chased again without new inputs. |
 | OrkAD PCI/VWAP best candidate | `docs/inbox/pci_vwap_orkad_reverification.md` · `scripts/pci_vwap_reverify.py` · `scripts/pci_vwap_bt.py` | **Failed real-data reproduction** — every plausible .set reading lands at PF 0.80–1.08 vs claimed 2.83. Do not deploy. |
 | CB Survivor economics on real data | `scripts/cb_survivor_bt.py` | **Negative** — counter-trend grid loses ~$1,700/mo and blows $10k on the trending half-year under every rescue architecture (freeze+pool, ZR, macro gating). |
-| Trend-direction-only architectures | `scripts/trend_direction_bt.py` · `reports/trend_direction_bt.json` | First net-positive results: Trend Rider SAR −$24/mo → +$44/mo with CB at 14.5% maxDD; one-sided grid +$226/mo with CB but 83.6% maxDD (undeployable). |
-| Mathematical framework | `docs/inbox/mathematical_framework.md` | Kelly ceiling ~0.2%/mo at current edge; only real structure in-sample is VR(4h)=0.83 reversion. Sign is decided by direction-vs-trend, not exits/rescues. |
+| Trend-direction-only architectures | `scripts/trend_direction_bt.py` · `reports/trend_direction_bt.json` | CORRECTED after review: one-sided grid's "+$226/mo" was H1 lookahead — it actually blows the account. Trend Rider SAR +$57/mo (no CB) / +$125/mo with CB at 11.4% maxDD; edge still t≈0.2 (statistically zero). |
+| HyperScalp v1.21 mechanical core | `scripts/hyperscalp_bt.py` · `reports/hyperscalp_bt.json` | **Negative both ways**: as-coded (SL guard rejects 11/12 limits — defect) −$17/mo; intended full cluster −$139/mo at 12.9% maxDD. Counter-move cluster loses on this trending period. |
+| Mathematical framework | `docs/inbox/mathematical_framework.md` | Kelly ceiling ~1.6%/mo with CB after cost-model correction (§7); only real structure in-sample is VR(4h)=0.83 reversion. Sign is decided by direction-vs-trend, not exits/rescues. |
 
 ## 4. Shared tooling
 

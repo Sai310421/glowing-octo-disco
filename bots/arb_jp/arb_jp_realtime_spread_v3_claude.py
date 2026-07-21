@@ -131,9 +131,9 @@ class State:
                 sell_fill = bid_px * (1 - sell.slip_bps*1e-4)
                 fee_buy  = buy_fill * buy.fees_bps*1e-4
                 fee_sell = sell_fill* sell.fees_bps*1e-4
-                slip_buy  = ask_px * buy.slip_bps*1e-4
-                slip_sell = bid_px * sell.slip_bps*1e-4
-                total_cost = (fee_buy+fee_sell+slip_buy+slip_sell)*qty_btc
+                # スリッページはフィル価格(buy_fill/sell_fill)に織り込み済みなので
+                # ここでは手数料のみ（v2はここで二重控除していた）
+                total_cost = (fee_buy+fee_sell)*qty_btc
                 pnl = (sell_fill - buy_fill)*qty_btc - total_cost if self.edge_mode=="net" \
                       else (sell_fill - buy_fill)*qty_btc  # grossモードはコスト非考慮
                 self.equity_sum += pnl; self.last_trade_ts=ts

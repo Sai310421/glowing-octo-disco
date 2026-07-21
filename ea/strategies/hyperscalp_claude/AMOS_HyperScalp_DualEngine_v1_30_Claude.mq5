@@ -157,6 +157,7 @@ datetime g_last_bar      = 0;
 
 // [A][C] Claude 判定キャッシュ
 ENUM_DIRECTION g_cl_dir    = DIR_NONE;
+ENUM_DIRECTION g_cl_want   = DIR_NONE; // 問い合わせ時の要求方向（変われば再取得）
 int            g_cl_conf   = 0;
 string         g_cl_reason = "(未取得)";
 datetime       g_cl_time   = 0;
@@ -553,8 +554,9 @@ bool ClaudeApproves(ENUM_DIRECTION want, double score)
    if(!ClaudeActive()) return true;
    if(MQLInfoInteger(MQL_TESTER)) return true;   // [D] テスターは素通し
 
-   // [C] キャッシュが新しければ再利用、古ければ再取得
-   if(!g_cl_valid || (TimeCurrent() - g_cl_time) >= (datetime)InpClaudeCooldownSec)
+   // [C] キャッシュが新しく、かつ同じ要求方向なら再利用。方向が変われば再取得
+   if(!g_cl_valid || want != g_cl_want ||
+      (TimeCurrent() - g_cl_time) >= (datetime)InpClaudeCooldownSec)
       ClaudeConsult(want, score);
 
    if(InpClaudeMode == CLAUDE_ADVISORY) return true;
@@ -574,6 +576,7 @@ bool ClaudeApproves(ENUM_DIRECTION want, double score)
 void ClaudeConsult(ENUM_DIRECTION want, double score)
 {
    g_cl_valid = true;             // 失敗してもクールダウンは効かせる（連打防止）
+   g_cl_want  = want;
    g_cl_time  = TimeCurrent();
    g_cl_apiOK = false;
 

@@ -130,6 +130,14 @@ int OnInit()
       Print("CBS: invalid inputs.");
       return(INIT_PARAMETERS_INCORRECT);
      }
+   // 両建て(ヘッジング)口座必須: ネッティングでは BUY/SELL 同時保有が相殺され
+   // 両バリ固定・プールの前提が全て崩れる
+   if((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE)
+      != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+     {
+      Print("CBS: this EA requires a hedging account (ACCOUNT_MARGIN_MODE_RETAIL_HEDGING). Netting mode detected - aborting.");
+      return(INIT_FAILED);
+     }
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(_Symbol);

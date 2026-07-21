@@ -253,7 +253,9 @@ def run(df, hours, weekdays, cfg=CFG, partial_r=False, collect_curve=False):
         pos = direction
         bars_held = 0
         partial_done = False
-        eq -= cost_half * lots + cfg["commission"] * lots / 2
+        # entry-side spread/slip is already inside the adverse entry price;
+        # only the commission half is charged here
+        eq -= cfg["commission"] * lots / 2
 
     months = max((ts.iloc[-1] - ts.iloc[0]).days / 30.4, 1e-9)
     total_ret = eq / cfg["starting_equity"] - 1.0

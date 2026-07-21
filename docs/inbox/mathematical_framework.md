@@ -85,3 +85,22 @@ Requirement for any CB engine: **c_eff < cb with bounded σ_cycle.**
 Anti-goals the math forbids: raising lots without raising μ (g unchanged,
 DD up); adding recovery layers below negative-μ entries (proven: containment
 only); optimizing exits when μ≈0 comes from entries.
+
+## 7. Correction (post code-review)
+
+Review of the harnesses found the SAR sim charged three half-spreads per
+round trip (adverse entry price + double per-side deduction) and the grid
+sim leaked one hour of future H1 close. Corrected numbers:
+
+- SAR per-cycle mean: −$0.077 → **+$0.176** (net +$336/6mo, 1,908 cycles);
+  t-stat ≈ 0.20 — **still statistically zero**; the sign flip is inside the
+  ±$0.88 CI. σ_cycle ≈ $38.5 unchanged.
+- Kelly ceiling with CB: μ = 0.176 + 0.209 = $0.385/cycle →
+  g* = μ²/2σ² × 324 cycles ≈ **1.6%/mo** (was 0.19%); without CB ≈ 0.34%/mo.
+  Still ~30× short of the 50%/mo target — conclusion unchanged in kind,
+  softened in degree.
+- The one-sided grid row in §5 (c_eff $9.46/lot, 240.9 lot churn) was a
+  lookahead artifact: with the H1 signal properly lagged the grid **blows
+  the account**. Only the SAR line survives as a CB engine
+  (c_eff now ≈ −$12.6/lot, i.e. the churn itself is profitable in-sample,
+  within noise).

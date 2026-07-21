@@ -70,6 +70,14 @@ perturbation h∈{0,1,2}×{12,13,14} (PF 0.75–0.92 everywhere, no cliff and no
 peak at (1,13) — the chosen hours add nothing robust on this feed),
 partial-close-as-R variant (PF 0.81).
 
+CORRECTION (post code-review): review found the harness double-charged the
+entry-side spread (adverse entry price AND a per-side deduction — three
+half-spreads per round trip). After the fix, re-runs at current script
+defaults give PF 0.69–0.86 across zone readings and server-time offsets
+(tz 0/2/3), IS/OOS 0.79 → 0.61. The exact table rows above are from the
+pre-fix harness state and are not bit-reproducible now, but every corrected
+configuration remains PF < 1 — the verdict below is unchanged.
+
 **The claimed metrics do not reproduce.** Feed difference explains ~0.2 of PF
 (the user's own cross-check), not 1.8+. The most likely source of the gap is
 the cycle/leg subsystem the .set hints at (`max_legs_per_cycle=4`,

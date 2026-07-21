@@ -44,7 +44,9 @@ def h1_trend(df):
     s = df.set_index("time")["close"].resample("1h").last().dropna()
     e20 = s.ewm(span=20, adjust=False).mean()
     e50 = s.ewm(span=50, adjust=False).mean()
-    d = (e20 > e50).astype(int) * 2 - 1
+    # left-labeled resample puts the hour's END close on its START label;
+    # shift(1) so minute rows only ever see the last COMPLETED hour
+    d = ((e20 > e50).astype(int) * 2 - 1).shift(1)
     return d.reindex(df.set_index("time").index, method="ffill").fillna(0).values
 
 
@@ -151,7 +153,6 @@ def sim_trend_rider(df, c_atr=2.0, k_trail=2.0, er_n=20, er_lo=0.30,
                 continue
             last_add = leg_ext = px
             trail_lv = 0.0
-            eq -= HALF * lot
             trades += 1
             continue
 
@@ -161,7 +162,6 @@ def sim_trend_rider(df, c_atr=2.0, k_trail=2.0, er_n=20, er_lo=0.30,
            ((dirn > 0 and px >= last_add + pitch) or (dirn < 0 and px <= last_add - pitch)):
             entries.append(px + dirn * (SPREAD / 2 + SLIP))
             last_add = px
-            eq -= HALF * lot
             trades += 1
         t_new = leg_ext - tdist if dirn > 0 else leg_ext + tdist
         trail_lv = t_new if trail_lv == 0.0 else \
@@ -176,7 +176,6 @@ def sim_trend_rider(df, c_atr=2.0, k_trail=2.0, er_n=20, er_lo=0.30,
             entries = [px + dirn * (SPREAD / 2 + SLIP)]
             last_add = leg_ext = px
             trail_lv = 0.0
-            eq -= HALF * lot
     px = c[-1]
     for e in entries:
         eq += dirn * (px - e) * lot * CONTRACT - HALF * lot
