@@ -125,3 +125,48 @@ question: trend-direction-only IS black-ink capable — ungated it earns only
 in trending regimes (+$57/mo full-period average, from the corrected
 `trend_direction_bt.py`), and a causal ER gate at the right scale holds the
 weak regime near break-even instead of bleeding.
+
+## ER regime gate implemented in the EA (v1.40)
+
+`ea/strategies/boom_trend_rider/BoomTrendRider_v1.mq5` now carries the gate
+verified above as an opt-in module (`InpUseRegimeGate`, default **false**):
+
+- Long-window Kaufman ER (`InpGateWindowMin`, default 1250min ≈ 250 M5 bars,
+  the WF winner) computed once per closed bar of the EA's own working
+  timeframe (whatever `SelectTimeframe()` picked - the window is specified
+  in minutes precisely so it stays ~20.8h-equivalent regardless of TF).
+- Thresholds (`thr_on` = `InpGateQOn` quantile, `thr_off` = `thr_on - InpGateQGap`
+  quantile) are computed ONLY from the trailing `InpGateTrainDays` (default
+  60, matching the WF train window) of ER history, recalibrated every
+  `InpGateRecalcDays` (default 30, matching the WF fold cadence) - same
+  causal design as the verified script, just running inside MT5 instead of
+  the offline harness.
+- Gate OFF: `HandleRegimeGate()` flattens both baskets (ride + lock) and
+  sits out (`ST_GATE_OFF`), checked right after the news module and before
+  the normal state machine. Gate back ON: resumes from `ST_FLAT`.
+- This is a SEPARATE signal from the short-window `EfficiencyRatio()` used
+  for pitch widening (decision 1) - the two do not interact.
+
+Not yet re-verified as compiled EA code (no MetaEditor in this environment).
+Default OFF until an MT5 Strategy Tester run confirms the same effect the
+Python harness measured, ideally on more than the one instrument/period
+tested so far.
+
+CORRECTION (post code-review, same day): four bugs fixed in `HandleRegimeGate()`
+/ `RecalibrateGateThresholds()` / `ApplyTimeframe()`:
+1. The gate no longer forces `ST_GATE_OFF -> ST_FLAT` while a close/delete
+   rejection has left a residual position or pending order - it keeps
+   retrying `CloseEverything()` and stays in control until the same
+   position/order counts used by the OFF path are actually zero.
+2. `ST_EMERGENCY` now retains ownership of the tick regardless of the gate
+   signal, so a lock-imbalance cooldown (`InpCooldownSec`) can no longer be
+   bypassed by the gate flipping back on mid-cooldown.
+3. `ApplyTimeframe()` now resets the gate's calibrated thresholds when the
+   auto-timeframe selector changes `g_tf` - ER distributions depend on
+   sampling frequency, so thresholds fit on the old TF are invalid on the
+   new one and are now recalibrated immediately instead of up to
+   `InpGateRecalcDays` stale.
+4. The trailing training window is now located via bar timestamps
+   (`iBarShift`) instead of assuming `InpGateTrainDays * 24h` of continuous
+   bars - session gaps (weekends etc.) made the bar-count approximation
+   diverge from the intended calendar window.
