@@ -96,11 +96,33 @@ cherry-picked reporting period.
 4. Independent replication of the sales page's own claim would require
    their actual backtest code/fill assumptions - unavailable here.
 
-## Status
+## Status: shipped as labeled infrastructure, not as a validated strategy
 
-Not proceeding to ONNX export / EA integration on this model - shipping an
-"AI-model EA" whose model has no measured edge would repeat exactly the
-kind of unverified claim this repo's discipline exists to prevent. Decision
-on next steps (ship an edge-agnostic ONNX scaffold anyway with clear
-labeling, extend the feature/data search, or drop this line) is with the
-user.
+The user asked for a complete "1 AI-model EA" regardless of this null
+result, understanding it as requested infrastructure rather than a claim of
+edge. Built:
+
+- `scripts/ai_direction_export_onnx.py` — final model fit on all labeled
+  data, exported via `onnxmltools.convert_lightgbm(..., zipmap=False)`.
+  **Note**: the default converter output uses a `sequence<map<int64,float>>`
+  probability type (ONNX "zipmap") that MT5's matrix-based `OnnxRun` cannot
+  consume directly - `zipmap=False` forces a plain `[N,2]` tensor instead.
+  onnxruntime vs. native LightGBM parity verified on a 2,000-row held-out
+  sample: max abs diff 8.18e-8 (float32 rounding only) - `PARITY OK`.
+- `ea/strategies/ai_xauusd_trader/AI_XAUUSD_Trader_v1.mq5` — loads the ONNX
+  model as a compiled-in resource (`#resource ... as uchar`, no manual file
+  copy needed), reimplements all 20 features by hand in MQL5 with the exact
+  same Wilder-EWM recursion `ai_direction_features.py` uses for ATR/RSI/ADX
+  (MT5's built-in `iADX` uses a different +DM/-DM reference and would feed
+  the model inputs it never saw in training - a real parity risk if
+  overlooked). Runs inference once per closed M5 bar; manages a time-exit
+  position (closes after the model's trained horizon) with an ATR safety
+  SL, matching how the backtest above was actually structured.
+- `InpMode` defaults to `MODE_SHADOW` (logs the model's decision every bar,
+  places no orders) precisely because of the null result above. `MODE_LIVE`
+  exists but is not a claim of profitability - see the EA's header comment
+  and `ea/strategies/ai_xauusd_trader/README.md`.
+
+If real edge is ever found (item 1-3 above), this EA's inference plumbing
+is production-shaped and ready to be pointed at a model that clears a real
+walk-forward bar - only the model file and `meta.json` need to change.
