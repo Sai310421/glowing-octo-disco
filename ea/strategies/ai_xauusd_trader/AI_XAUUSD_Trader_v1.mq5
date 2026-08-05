@@ -70,6 +70,10 @@ input bool   InpShowPanel       = true;
 #define WARMUP_BARS 300
 
 long   ExtOnnxHandle = INVALID_HANDLE;
+int    g_hEma20      = INVALID_HANDLE;
+int    g_hEma50      = INVALID_HANDLE;
+int    g_hEma200     = INVALID_HANDLE;
+int    g_hATR        = INVALID_HANDLE;
 int    g_horizon     = HORIZON_DEFAULT;
 datetime g_lastBar   = 0;
 double g_lastProba   = 0.5;
@@ -108,6 +112,16 @@ int OnInit()
       !OnnxSetOutputShape(ExtOnnxHandle, 1, probaShape))
      { Print("AIXAU: Onnx*Shape failed, err=", GetLastError()); return(INIT_FAILED); }
 
+   // created once here, reused everywhere - creating a fresh handle per
+   // bar/call (as the first version did) leaks terminal indicator handles
+   g_hEma20  = iMA(_Symbol, PERIOD_M5, 20,  0, MODE_EMA, PRICE_CLOSE);
+   g_hEma50  = iMA(_Symbol, PERIOD_M5, 50,  0, MODE_EMA, PRICE_CLOSE);
+   g_hEma200 = iMA(_Symbol, PERIOD_M5, 200, 0, MODE_EMA, PRICE_CLOSE);
+   g_hATR    = iATR(_Symbol, PERIOD_M5, 14);
+   if(g_hEma20 == INVALID_HANDLE || g_hEma50 == INVALID_HANDLE ||
+      g_hEma200 == INVALID_HANDLE || g_hATR == INVALID_HANDLE)
+     { Print("AIXAU: indicator handle creation failed, err=", GetLastError()); return(INIT_FAILED); }
+
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(_Symbol);
@@ -125,6 +139,10 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(ExtOnnxHandle != INVALID_HANDLE) OnnxRelease(ExtOnnxHandle);
+   if(g_hEma20  != INVALID_HANDLE) IndicatorRelease(g_hEma20);
+   if(g_hEma50  != INVALID_HANDLE) IndicatorRelease(g_hEma50);
+   if(g_hEma200 != INVALID_HANDLE) IndicatorRelease(g_hEma200);
+   if(g_hATR    != INVALID_HANDLE) IndicatorRelease(g_hATR);
    Comment("");
   }
 
@@ -277,12 +295,9 @@ bool ComputeFeatures(double &out[])
    double er[];
    KaufmanEr(c, 20, er);
 
-   int hEma20  = iMA(_Symbol, PERIOD_M5, 20,  0, MODE_EMA, PRICE_CLOSE);
-   int hEma50  = iMA(_Symbol, PERIOD_M5, 50,  0, MODE_EMA, PRICE_CLOSE);
-   int hEma200 = iMA(_Symbol, PERIOD_M5, 200, 0, MODE_EMA, PRICE_CLOSE);
    double ema20b[1], ema50b[1], ema200b[1];
-   if(CopyBuffer(hEma20, 0, 1, 1, ema20b) < 1 || CopyBuffer(hEma50, 0, 1, 1, ema50b) < 1 ||
-      CopyBuffer(hEma200, 0, 1, 1, ema200b) < 1)
+   if(CopyBuffer(g_hEma20, 0, 1, 1, ema20b) < 1 || CopyBuffer(g_hEma50, 0, 1, 1, ema50b) < 1 ||
+      CopyBuffer(g_hEma200, 0, 1, 1, ema200b) < 1)
      { Print("AIXAU: EMA CopyBuffer failed"); return(false); }
    double ema20 = ema20b[0], ema50 = ema50b[0], ema200 = ema200b[0];
 
@@ -309,7 +324,10 @@ bool ComputeFeatures(double &out[])
    double hourFrac = dt.hour + dt.min / 60.0;
    double hourSin = MathSin(2.0 * M_PI * hourFrac / 24.0);
    double hourCos = MathCos(2.0 * M_PI * hourFrac / 24.0);
-   double dow = (double)dt.day_of_week;
+   // MQL5 day_of_week: Sunday=0..Saturday=6. Training used pandas
+   // dt.dayofweek: Monday=0..Sunday=6. Convert or every live "dow" input
+   // is off by a fixed offset from what the model was trained on.
+   double dow = (double)((dt.day_of_week + 6) % 7);
 
    double ret1  = (c[t] - c[t - 1])  / c[t - 1];
    double ret3  = (c[t] - c[t - 3])  / c[t - 3];
@@ -391,9 +409,8 @@ double EffLot()
    double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double atrNow = 0.0; // rough sizing reference
-   int hATR = iATR(_Symbol, PERIOD_M5, 14);
    double buf[1];
-   if(CopyBuffer(hATR, 0, 1, 1, buf) > 0) atrNow = buf[0];
+   if(CopyBuffer(g_hATR, 0, 1, 1, buf) > 0) atrNow = buf[0];
    double perUnit = (tickSize > 0.0) ? tickVal / tickSize : 0.0;
    double dist = MathMax(InpProtectiveSLAtr * atrNow, 10 * _Point);
    double lot = (perUnit > 0.0 && dist > 0.0) ? (eq * InpRiskPercent / 100.0) / (dist * perUnit) : InpFixedLot;
@@ -408,9 +425,8 @@ void EnterPosition(const int dir)
   {
    double lot = EffLot();
    double atrNow = 0.0;
-   int hATR = iATR(_Symbol, PERIOD_M5, 14);
    double buf[1];
-   if(CopyBuffer(hATR, 0, 1, 1, buf) > 0) atrNow = buf[0];
+   if(CopyBuffer(g_hATR, 0, 1, 1, buf) > 0) atrNow = buf[0];
    double sl = 0.0;
    if(InpProtectiveSLAtr > 0.0 && atrNow > 0.0)
      {
