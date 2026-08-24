@@ -1,1 +1,290 @@
-PLACEHOLDER
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#111827" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="manifest.webmanifest">
+<title>YouTube → NotebookLM Harvester</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f4f6f8}
+*{box-sizing:border-box}
+body{margin:0;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);min-height:100vh}
+.wrap{max-width:860px;margin:auto;padding:20px}
+.hero{padding:18px 0 10px}
+h1{font-size:28px;margin:0 0 8px}
+p{line-height:1.55}
+.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 4px 18px rgba(0,0,0,.06)}
+label{display:block;font-weight:700;margin:12px 0 6px}
+input,select,button,textarea{width:100%;font:inherit}
+input,select,textarea{padding:13px;border:1px solid #d1d5db;border-radius:12px;background:white}
+textarea{min-height:180px}
+button{padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:700;margin-top:12px}
+button.secondary{background:#e5e7eb;color:#111827}
+button:disabled{opacity:.5}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.stat{background:#f9fafb;border-radius:14px;padding:12px;text-align:center}
+.stat b{display:block;font-size:22px}
+.muted{color:#6b7280;font-size:14px}
+.ok{color:#047857}
+.err{color:#b91c1c}
+.hidden{display:none}
+.row{display:flex;gap:10px;align-items:center}
+.row input[type=checkbox]{width:auto}
+@media(max-width:620px){.grid,.stats{grid-template-columns:1fr}.wrap{padding:14px}h1{font-size:24px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hero">
+<h1>YouTube → NotebookLM Harvester</h1>
+<p class="muted">チャンネルURLを1本貼るだけで、公開動画URLを全取得し、TXT / CSV / PDF / 50件分割を生成します。</p>
+</div>
+<div class="card">
+<label>YouTube Data API Key</label>
+<input id="apiKey" type="password" placeholder="AIza..." autocomplete="off">
+<div class="row"><input id="remember" type="checkbox" checked><span class="muted">この端末だけに保存</span></div>
+<label>チャンネルURL / @handle</label>
+<input id="channel" value="https://youtube.com/@fx-gold-navi" placeholder="https://youtube.com/@channel">
+<div class="grid">
+<div>
+<label>Shorts</label>
+<select id="shortsMode">
+<option value="include">含める</option>
+<option value="exclude">可能な範囲で除外</option>
+</select>
+</div>
+<div>
+<label>NotebookLM分割数</label>
+<select id="chunkSize">
+<option value="50">50件</option>
+<option value="40">40件</option>
+<option value="25">25件</option>
+</select>
+</div>
+</div>
+<button id="fetchBtn">全動画を取得</button>
+<div id="status" class="muted" style="margin-top:10px"></div>
+</div>
+<div id="resultCard" class="card hidden">
+<div class="stats">
+<div class="stat"><b id="count">0</b><span>動画</span></div>
+<div class="stat"><b id="chunks">0</b><span>分割</span></div>
+<div class="stat"><b id="channelName">-</b><span>Channel</span></div>
+</div>
+<label>NotebookLM用URL一覧</label>
+<textarea id="output" readonly></textarea>
+<div class="grid">
+<button id="copyBtn">全URLコピー</button>
+<button id="txtBtn">TXT保存</button>
+<button id="csvBtn">CSV保存</button>
+<button id="pdfBtn">PDF保存</button>
+<button id="chunkBtn" class="secondary">50件分割TXTを保存</button>
+<button id="shareBtn" class="secondary">共有</button>
+</div>
+</div>
+<div class="card">
+<b>使い方</b>
+<p class="muted">Google CloudでYouTube Data API v3を有効化してAPIキーを作成し、この画面へ1回入力します。キーは「この端末だけに保存」を選んだ場合のみブラウザのlocalStorageへ保存され、GitHubには送信・保存しません。</p>
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let videos = [];
+let channelTitle = "";
+const savedKey = localStorage.getItem("yt_api_key");
+if(savedKey) $("apiKey").value = savedKey;
+function status(msg, cls="muted"){
+$("status").className = cls;
+$("status").textContent = msg;
+}
+function handleFromInput(s){
+s = s.trim();
+if(s.startsWith("@")) return s.slice(1);
+try{
+const u = new URL(s);
+const parts = u.pathname.split("/").filter(Boolean);
+const at = parts.find(x => x.startsWith("@"));
+if(at) return at.slice(1);
+}catch(e){}
+return null;
+}
+function channelIdFromInput(s){
+try{
+const u = new URL(s.trim());
+const parts = u.pathname.split("/").filter(Boolean);
+if(parts[0] === "channel" && parts[1]) return parts[1];
+}catch(e){}
+return null;
+}
+async function api(path, params){
+const key = $("apiKey").value.trim();
+const q = new URLSearchParams({...params, key});
+const r = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${q}`);
+const j = await r.json();
+if(!r.ok) throw new Error(j?.error?.message || "YouTube API error");
+return j;
+}
+async function resolveChannel(input){
+const directId = channelIdFromInput(input);
+let j;
+if(directId){
+j = await api("channels", {part:"snippet,contentDetails", id:directId});
+} else {
+const handle = handleFromInput(input);
+if(!handle) throw new Error("チャンネルURLまたは @handle を入力してください");
+j = await api("channels", {part:"snippet,contentDetails", forHandle:handle});
+}
+if(!j.items?.length) throw new Error("チャンネルを見つけられませんでした");
+const c = j.items[0];
+return {
+title:c.snippet.title,
+uploads:c.contentDetails.relatedPlaylists.uploads
+};
+}
+async function fetchAllPlaylistItems(playlistId){
+let out=[], token="";
+do{
+const j = await api("playlistItems", {
+part:"snippet,contentDetails",
+playlistId,
+maxResults:"50",
+...(token ? {pageToken:token} : {})
+});
+for(const x of (j.items||[])){
+const id = x.contentDetails?.videoId || x.snippet?.resourceId?.videoId;
+if(!id) continue;
+out.push({
+id,
+title:x.snippet?.title || "",
+publishedAt:x.contentDetails?.videoPublishedAt || x.snippet?.publishedAt || "",
+url:`https://www.youtube.com/watch?v=${id}`
+});
+}
+token = j.nextPageToken || "";
+status(`${out.length} 本取得中…`);
+}while(token);
+return out;
+}
+async function maybeExcludeShorts(items){
+if($("shortsMode").value !== "exclude") return items;
+const keep=[];
+for(let i=0;i<items.length;i+=50){
+const batch=items.slice(i,i+50);
+const j=await api("videos",{part:"contentDetails", id:batch.map(v=>v.id).join(",")});
+const durations=new Map((j.items||[]).map(v=>[v.id,v.contentDetails?.duration||""]));
+for(const v of batch){
+const d=durations.get(v.id);
+const sec=isoDurationToSec(d);
+if(sec===null || sec>60) keep.push(v);
+}
+status(`Shorts判定中… ${Math.min(i+50,items.length)}/${items.length}`);
+}
+return keep;
+}
+function isoDurationToSec(s){
+if(!s) return null;
+const m=s.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+if(!m) return null;
+return +(m[1]||0)*3600 + +(m[2]||0)*60 + +(m[3]||0);
+}
+function render(){
+$("resultCard").classList.remove("hidden");
+$("count").textContent=videos.length;
+$("chunks").textContent=Math.ceil(videos.length/+$("chunkSize").value);
+$("channelName").textContent=channelTitle.length>14 ? channelTitle.slice(0,14)+"…" : channelTitle;
+$("output").value=videos.map(v=>v.url).join("\n");
+}
+function download(name, text, type="text/plain;charset=utf-8"){
+const blob=new Blob([text],{type});
+const a=document.createElement("a");
+a.href=URL.createObjectURL(blob);
+a.download=name;
+a.click();
+setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+$("fetchBtn").onclick=async()=>{
+try{
+$("fetchBtn").disabled=true;
+const key=$("apiKey").value.trim();
+if(!key) throw new Error("YouTube Data API Keyを入力してください");
+if($("remember").checked) localStorage.setItem("yt_api_key",key);
+else localStorage.removeItem("yt_api_key");
+status("チャンネルを確認中…");
+const c=await resolveChannel($("channel").value);
+channelTitle=c.title;
+status("全公開動画を取得中…");
+let list=await fetchAllPlaylistItems(c.uploads);
+list=await maybeExcludeShorts(list);
+const seen=new Set();
+videos=list.filter(v=>!seen.has(v.id)&&seen.add(v.id));
+render();
+status(`完了：${videos.length} 本`, "ok");
+}catch(e){
+status(e.message || String(e),"err");
+}finally{
+$("fetchBtn").disabled=false;
+}
+};
+$("copyBtn").onclick=async()=>{
+await navigator.clipboard.writeText($("output").value);
+status("全URLをコピーしました","ok");
+};
+$("txtBtn").onclick=()=>download(
+safe(channelTitle)+"_NotebookLM_URLs.txt",
+videos.map(v=>v.url).join("\n")
+);
+$("csvBtn").onclick=()=>{
+const rows=[["No","VideoID","Title","PublishedAt","URL"],...videos.map((v,i)=>[i+1,v.id,v.title,v.publishedAt,v.url])];
+const csv="\uFEFF"+rows.map(r=>r.map(x=>`"${String(x).replaceAll('"','""')}"`).join(",")).join("\n");
+download(safe(channelTitle)+"_Videos.csv",csv,"text/csv;charset=utf-8");
+};
+$("pdfBtn").onclick=()=>{
+if(!window.jspdf) return status("PDFライブラリを読み込めませんでした","err");
+const { jsPDF } = window.jspdf;
+const doc=new jsPDF({unit:"mm",format:"a4"});
+doc.setFont("helvetica","normal");
+let y=14;
+doc.setFontSize(14);
+doc.text("YouTube Channel URL List",12,y); y+=7;
+doc.setFontSize(9);
+doc.text(`Channel: ${channelTitle}`,12,y); y+=5;
+doc.text(`Videos: ${videos.length}`,12,y); y+=7;
+videos.forEach((v,i)=>{
+const line=`${i+1}. ${v.url}`;
+const split=doc.splitTextToSize(line,185);
+if(y + split.length*4.5 > 285){ doc.addPage(); y=14; }
+doc.text(split,12,y);
+y += split.length*4.5 + 1.2;
+});
+doc.save(safe(channelTitle)+"_NotebookLM_URLs.pdf");
+};
+$("chunkBtn").onclick=()=>{
+const n=+$("chunkSize").value;
+for(let i=0;i<videos.length;i+=n){
+const part=videos.slice(i,i+n);
+const num=String(Math.floor(i/n)+1).padStart(2,"0");
+download(`${safe(channelTitle)}_NotebookLM_${num}.txt`,part.map(v=>v.url).join("\n"));
+}
+};
+$("shareBtn").onclick=async()=>{
+const text=videos.map(v=>v.url).join("\n");
+if(navigator.share){
+try{await navigator.share({title:`${channelTitle} URL list`,text});}
+catch(e){}
+}else{
+await navigator.clipboard.writeText(text);
+status("共有非対応のためクリップボードへコピーしました","ok");
+}
+};
+function safe(s){return (s||"youtube_channel").replace(/[\\/:*?"<>|]/g,"_").slice(0,80)}
+if("serviceWorker" in navigator){
+navigator.serviceWorker.register("./sw.js").catch(()=>{});
+}
+</script>
+</body>
+</html>
